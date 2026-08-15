@@ -10,127 +10,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
-    env:
-      PROJECT_DIR: project/source
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.0'
           channel: stable
-          cache: true
 
-      - name: Download Project
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-          ZIP_URL: ${{ inputs.zip_url }}
-        run: |
-          set -e
-
-          mkdir -p project
-
-          if [ -z "$GH_TOKEN" ]; then
-            echo "GH_PAT belum tersedia"
-            exit 1
-          fi
-
-          if [ -z "$ZIP_URL" ]; then
-            echo "ZIP_URL belum tersedia"
-            exit 1
-          fi
-
-          curl -L \
-            --fail-with-body \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/octet-stream" \
-            "$ZIP_URL" \
-            -o project/project.zip
-
-          file project/project.zip
-
-          unzip -t project/project.zip
-
-          mkdir -p project/source
-          unzip -q project/project.zip -d project/source
-
-      - name: Prepare Flutter
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          flutter --version
-          flutter pub get
-
-      - name: Install Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.14'
-
-      - name: Prepare Gradle
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          mkdir -p android/gradle/wrapper
-
-          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
-          networkTimeout=120000
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-
-          if [ -f android/gradlew ]; then
-            chmod +x android/gradlew
-          fi
-
-          gradle --version
-
-      - name: Check Flutter Project
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          test -f pubspec.yaml
-          test -d android
-          test -f android/app/build.gradle.kts || test -f android/app/build.gradle
+      - name: Install dependencies
+        run: flutter pub get
 
       - name: Build APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          flutter clean
-          flutter pub get
-
-          flutter build apk \
-            --release \
-            --android-skip-build-dependency-validation
-
-      - name: Find APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          find build/app/outputs -type f -name "*.apk" -print
+        run: flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: flutter-release-apk
-          path: |
-            ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/*.apk
-          if-no-files-found: error
-          retention-days: 7
+          path: build/app/outputs/flutter-apk/app-release.apk
