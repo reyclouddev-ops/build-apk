@@ -7,13 +7,11 @@ on:
         description: "URL GitHub Release Asset ZIP"
         required: true
         type: string
-
       tag:
         description: "Build tag"
         required: false
         default: "latest"
         type: string
-
       build_type:
         description: "Build type"
         required: false
@@ -61,6 +59,8 @@ jobs:
 
           unzip -t project/project.zip >/dev/null
 
+          echo "ZIP valid."
+
       - name: Extract Project
         run: |
           set -e
@@ -68,6 +68,8 @@ jobs:
           mkdir -p project/source
 
           unzip -q project/project.zip -d project/source
+
+          echo "Project berhasil diekstrak."
 
       - name: Find Flutter Project
         run: |
@@ -80,14 +82,13 @@ jobs:
             | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "Flutter project tidak ditemukan."
+            echo "pubspec.yaml tidak ditemukan."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project:"
-          echo "$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -110,17 +111,31 @@ jobs:
         run: |
           set -e
 
+          echo "Java:"
           java -version
+
+          echo "Flutter:"
           flutter --version
+
+          echo "Gradle:"
           gradle --version
 
-      - name: Validate Project
+      - name: Validate Flutter Project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
-          test -f pubspec.yaml
-          test -d android
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "pubspec.yaml tidak ditemukan."
+            exit 1
+          fi
+
+          if [ ! -d "android" ]; then
+            echo "Folder android tidak ditemukan."
+            exit 1
+          fi
+
+          echo "Flutter project valid."
 
       - name: Fix Gradle Wrapper
         working-directory: ${{ env.PROJECT_DIR }}
@@ -129,22 +144,20 @@ jobs:
 
           FILE="android/gradle/wrapper/gradle-wrapper.properties"
 
+          if [ ! -f "$FILE" ]; then
+            echo "gradle-wrapper.properties tidak ditemukan."
+            exit 1
+          fi
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           path = Path("android/gradle/wrapper/gradle-wrapper.properties")
-
           text = path.read_text()
 
           text = re.sub(
-              r'https?://[^\\s]+/distributions/gradle-[^\\s]+\\.zip',
-              'https://services.gradle.org/distributions/gradle-8.14.0-bin.zip',
-              text
-          )
-
-          text = re.sub(
-              r'gradle-[0-9]+\\.[0-9]+(?:\\.[0-9]+)?-(?:bin|all)\\.zip',
+              r'gradle-[0-9]+\.[0-9]+(?:\.[0-9]+)?-(?:bin|all)\.zip',
               'gradle-8.14.0-bin.zip',
               text
           )
@@ -152,50 +165,62 @@ jobs:
           path.write_text(text)
           PY
 
-          cat "$FILE"
+          echo "Gradle:"
+          grep "distributionUrl" "$FILE"
 
       - name: Fix Kotlin
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
           set -e
 
-          python3 - <<'PY'
+          python3 <<'PY'
           from pathlib import Path
           import re
 
           files = [
-              Path("android/settings.gradle"),
-              Path("android/settings.gradle.kts"),
-              Path("android/build.gradle"),
-              Path("android/build.gradle.kts")
+              "android/settings.gradle",
+              "android/settings.gradle.kts",
+              "android/build.gradle",
+              "android/build.gradle.kts"
           ]
 
-          for path in files:
+          for filename in files:
+              path = Path(filename)
+
               if not path.exists():
                   continue
 
               text = path.read_text()
 
-              text = re.sub(
-                  r'(org\\.jetbrains\\.kotlin\\.android["\\']?\\s+version\\s+["\\'])[0-9.]+(["\\'])',
-                  r'\\g<1>2.2.21\\g<2>',
-                  text
-              )
+              replacements = [
+                  (
+                      r'(id\s*\(\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)\s*version\s*["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  ),
+                  (
+                      r'(id\s+["\']org\.jetbrains\.kotlin\.android["\']\s+version\s+["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  ),
+                  (
+                      r'(kotlin\(["\']android["\']\)\s+version\s+["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  )
+              ]
 
-              text = re.sub(
-                  r'(id\\(["\\']org\\.jetbrains\\.kotlin\\.android["\\']\\)\\s+version\\s+["\\'])[0-9.]+(["\\'])',
-                  r'\\g<1>2.2.21\\g<2>',
-                  text
-              )
-
-              text = re.sub(
-                  r'(kotlin\\(["\\']android["\\']\\)\\s+version\\s+["\\'])[0-9.]+(["\\'])',
-                  r'\\g<1>2.2.21\\g<2>',
-                  text
-              )
+              for pattern, replacement in replacements:
+                  text = re.sub(
+                      pattern,
+                      replacement,
+                      text
+                  )
 
               path.write_text(text)
+
+              print(f"Checked: {filename}")
           PY
+
+          echo "Kotlin configuration checked."
 
       - name: Configure Android
         working-directory: ${{ env.PROJECT_DIR }}
@@ -207,32 +232,41 @@ jobs:
           touch "$FILE"
 
           if grep -q "^android.newDsl=" "$FILE"; then
-            sed -i 's/^android.newDsl=.*/android.newDsl=false/' "$FILE"
+            sed -i \
+              's/^android.newDsl=.*/android.newDsl=false/' \
+              "$FILE"
           else
             echo "android.newDsl=false" >> "$FILE"
           fi
 
           if grep -q "^android.builtInKotlin=" "$FILE"; then
-            sed -i 's/^android.builtInKotlin=.*/android.builtInKotlin=false/' "$FILE"
+            sed -i \
+              's/^android.builtInKotlin=.*/android.builtInKotlin=false/' \
+              "$FILE"
           else
             echo "android.builtInKotlin=false" >> "$FILE"
           fi
+
+          echo "Android configuration:"
+          cat "$FILE"
 
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
+
           flutter pub get
 
-      - name: Prepare Gradle
+      - name: Prepare Gradle Wrapper
         working-directory: ${{ env.PROJECT_DIR }}/android
         run: |
           set -e
 
           chmod +x gradlew
 
-          echo "Gradle wrapper configured:"
-          grep distributionUrl gradle/wrapper/gradle-wrapper.properties
+          echo "Gradle wrapper:"
+          grep "distributionUrl" \
+            gradle/wrapper/gradle-wrapper.properties
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -242,6 +276,7 @@ jobs:
           set -e
 
           flutter clean
+
           flutter pub get
 
           if [ "${{ inputs.build_type }}" = "debug" ]; then
@@ -258,7 +293,7 @@ jobs:
           APK_DIR="build/app/outputs/flutter-apk"
 
           if [ ! -d "$APK_DIR" ]; then
-            echo "APK directory tidak ditemukan."
+            echo "Folder APK tidak ditemukan."
             exit 1
           fi
 
@@ -267,7 +302,10 @@ jobs:
             -name "*.apk" \
             -exec ls -lh {} \;
 
-          COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l)
+          COUNT=$(find "$APK_DIR" \
+            -type f \
+            -name "*.apk" \
+            | wc -l)
 
           if [ "$COUNT" -eq 0 ]; then
             echo "APK tidak ditemukan."
