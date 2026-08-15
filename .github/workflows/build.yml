@@ -2,40 +2,260 @@ name: Build Flutter APK
 
 on:
   workflow_dispatch:
+    inputs:
+      zip_url:
+        description: Flutter project ZIP asset URL
+        required: true
+        type: string
+      tag:
+        description: Build tag
+        required: true
+        type: string
+      build_type:
+        description: Build type
+        required: false
+        default: release
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      PROJECT_DIR: project/source
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
-      - name: Install dependencies
-        run: flutter pub get
+      - name: Download Project ZIP
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -e
+
+          mkdir -p project
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_PAT belum tersedia."
+            exit 1
+          fi
+
+          if [ -z "$ZIP_URL" ]; then
+            echo "ZIP_URL belum tersedia."
+            exit 1
+          fi
+
+          echo "Downloading project ZIP..."
+
+          curl -L \
+            --fail-with-body \
+            --retry 5 \
+            --retry-delay 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -H "User-Agent: FlutterBuildBot/1.0" \
+            "$ZIP_URL" \
+            -o project/project.zip
+
+          echo "File information:"
+          ls -lh project/project.zip
+          file project/project.zip
+
+          echo "Testing ZIP..."
+
+          if ! unzip -t project/project.zip >/dev/null 2>&1; then
+            echo "ZIP project tidak valid."
+
+            echo "Response:"
+            head -c 1000 project/project.zip || true
+
+            exit 1
+          fi
+
+          echo "ZIP valid."
+
+      - name: Extract Project
+        run: |
+          set -e
+
+          mkdir -p project/source
+
+          unzip -q project/project.zip -d project/source
+
+          echo "Project contents:"
+          find project/source -maxdepth 2 -type f | head -100
+
+      - name: Detect Flutter Project
+        run: |
+          set -e
+
+          if [ ! -f "${PROJECT_DIR}/pubspec.yaml" ]; then
+            FOUND=$(find project/source -type f -name pubspec.yaml -print -quit)
+
+            if [ -z "$FOUND" ]; then
+              echo "pubspec.yaml tidak ditemukan."
+              exit 1
+            fi
+
+            PROJECT_PATH=$(dirname "$FOUND")
+
+            echo "PROJECT_DIR=$PROJECT_PATH" >> "$GITHUB_ENV"
+
+            echo "Flutter project ditemukan:"
+            echo "$PROJECT_PATH"
+          else
+            echo "Flutter project:"
+            echo "$PROJECT_DIR"
+          fi
+
+      - name: Verify Flutter
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          echo "Flutter:"
+          flutter --version
+
+          echo "Project:"
+          flutter doctor -v
+
+      - name: Install Dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          flutter pub get
+
+      - name: Prepare Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          if [ ! -d android ]; then
+            echo "Folder android tidak ditemukan."
+            exit 1
+          fi
+
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i 's#gradle-[0-9.]*-bin.zip#gradle-8.14-bin.zip#g' \
+              android/gradle/wrapper/gradle-wrapper.properties
+          fi
+
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
+          fi
+
+      - name: Configure Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          touch android/gradle.properties
+
+          if ! grep -q "^android.newDsl=" android/gradle.properties; then
+            echo "android.newDsl=false" >> android/gradle.properties
+          fi
+
+      - name: Flutter Clean
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          flutter clean
+          flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          set -e
 
-      - name: Upload APK
+          echo "Build type: $BUILD_TYPE"
+          echo "Build tag: ${{ inputs.tag }}"
+
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            flutter build apk \
+              --debug \
+              --android-skip-build-dependency-validation
+          else
+            flutter build apk \
+              --release \
+              --android-skip-build-dependency-validation
+          fi
+
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          echo "Searching APK..."
+
+          find build/app/outputs -type f -name "*.apk" -print
+
+          APK_COUNT=$(find build/app/outputs -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "APK tidak ditemukan."
+            exit 1
+          fi
+
+          echo "APK berhasil dibuat."
+
+      - name: Rename APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          BUILD_TAG: ${{ inputs.tag }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          set -e
+
+          mkdir -p build/final
+
+          APK=$(find build/app/outputs -type f -name "*.apk" | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "APK tidak ditemukan."
+            exit 1
+          fi
+
+          cp "$APK" "build/final/Flutter-${BUILD_TAG}-${BUILD_TYPE}.apk"
+
+          ls -lh build/final
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: Flutter-${{ inputs.tag }}-${{ inputs.build_type }}
+          path: ${{ env.PROJECT_DIR }}/build/final/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "================================"
+          echo "Flutter APK Build"
+          echo "================================"
+          echo "Tag: ${{ inputs.tag }}"
+          echo "Build Type: ${{ inputs.build_type }}"
+          echo "Project: ${{ env.PROJECT_DIR }}"
+          echo "================================"
