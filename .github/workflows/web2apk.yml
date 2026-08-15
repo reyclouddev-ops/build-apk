@@ -1,0 +1,239 @@
+name: Web2Apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: Website URL
+        required: true
+        type: string
+      app_name:
+        description: Application name
+        required: true
+        type: string
+      icon_url:
+        description: Application icon URL
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      FLUTTER_VERSION: "3.47.0"
+      JAVA_VERSION: "17"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.0"
+          channel: stable
+          cache: true
+
+      - name: Create Flutter Project
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -e
+
+          NAME=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g' | sed 's/^[0-9]/app_/')
+
+          if [ -z "$NAME" ]; then
+            NAME="web_to_apk"
+          fi
+
+          flutter create \
+            --platforms=android \
+            --project-name "$NAME" \
+            web_to_apk
+
+      - name: Configure WebView
+        env:
+          WEB_URL: ${{ inputs.web_url }}
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter pub add webview_flutter
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("lib/main.dart")
+          url = "${{ inputs.web_url }}"
+
+          text = f'''import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          void main() {{
+            WidgetsFlutterBinding.ensureInitialized();
+            runApp(const WebToApkApp());
+          }}
+
+          class WebToApkApp extends StatefulWidget {{
+            const WebToApkApp({{super.key}});
+
+            @override
+            State<WebToApkApp> createState() => _WebToApkAppState();
+          }}
+
+          class _WebToApkAppState extends State<WebToApkApp> {{
+            late final WebViewController controller;
+
+            @override
+            void initState() {{
+              super.initState();
+
+              controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..setNavigationDelegate(
+                  NavigationDelegate(
+                    onWebResourceError: (error) {{
+                      debugPrint(error.description);
+                    }},
+                  ),
+                )
+                ..loadRequest(Uri.parse("{url}"));
+            }}
+
+            @override
+            Widget build(BuildContext context) {{
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                home: Scaffold(
+                  body: SafeArea(
+                    child: WebViewWidget(
+                      controller: controller,
+                    ),
+                  ),
+                ),
+              );
+            }}
+          }}
+          '''
+
+          p.write_text(text)
+
+      - name: Configure Android
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          text = p.read_text()
+
+          if "android.permission.INTERNET" not in text:
+              text = text.replace(
+                  "<manifest",
+                  '<manifest\n    <uses-permission android:name="android.permission.INTERNET" />',
+                  1
+              )
+
+          p.write_text(text)
+
+          p = Path("android/app/src/main/kotlin")
+          files = list(p.rglob("MainActivity.kt"))
+
+          for f in files:
+              text = f.read_text()
+              text = text.replace(
+                  "import io.flutter.embedding.android.FlutterActivity",
+                  "import io.flutter.embedding.android.FlutterActivity"
+              )
+              f.write_text(text)
+          PY
+
+      - name: Download Icon
+        env:
+          ICON_URL: ${{ inputs.icon_url }}
+        run: |
+          set -e
+
+          mkdir -p web_to_apk/assets
+
+          curl \
+            --location \
+            --fail \
+            --retry 5 \
+            --retry-delay 2 \
+            --connect-timeout 30 \
+            --max-time 120 \
+            -A "FlutterBuildBot/1.0" \
+            "$ICON_URL" \
+            --output web_to_apk/assets/icon.png
+
+          test -s web_to_apk/assets/icon.png
+
+          file web_to_apk/assets/icon.png
+
+      - name: Configure Launcher Icon
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter pub add --dev flutter_launcher_icons
+
+          cat >> pubspec.yaml <<'EOF'
+
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: assets/icon.png
+            min_sdk_android: 21
+          EOF
+
+          flutter pub get
+          dart run flutter_launcher_icons
+
+      - name: Build APK
+        run: |
+          set -e
+
+          cd web_to_apk
+
+          flutter clean
+          flutter pub get
+
+          flutter build apk \
+            --release \
+            --android-skip-build-dependency-validation
+
+      - name: Verify APK
+        run: |
+          set -e
+
+          test -f web_to_apk/build/app/outputs/flutter-apk/app-release.apk
+
+          ls -lh web_to_apk/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web2apk-${{ github.run_number }}
+          path: web_to_apk/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
