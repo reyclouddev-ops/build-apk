@@ -4,14 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL file ZIP project Flutter"
+        description: "URL GitHub Release Asset ZIP"
         required: true
         type: string
+
       tag:
         description: "Tag build"
         required: false
         default: "latest"
         type: string
+
       build_type:
         description: "Build type"
         required: false
@@ -30,15 +32,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Download Project ZIP
         env:
           ZIP_URL: ${{ inputs.zip_url }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
+          set -e
+
           mkdir -p project
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "❌ GH_PAT belum dibuat di Repository Secrets!"
+            exit 1
+          fi
+
+          echo "📦 Downloading Flutter project..."
 
           curl -L \
             --fail-with-body \
@@ -47,27 +58,47 @@ jobs:
             "$ZIP_URL" \
             -o project/project.zip
 
-          echo "Ukuran file:"
+          echo "📁 File information:"
           ls -lh project/project.zip
-
           file project/project.zip
+
+          if ! unzip -t project/project.zip >/dev/null 2>&1; then
+            echo "❌ File yang didownload bukan ZIP yang valid!"
+            echo "Response dari server:"
+            head -c 500 project/project.zip || true
+            exit 1
+          fi
+
+          echo "✅ ZIP valid."
 
       - name: Extract Project
         run: |
+          set -e
+
           mkdir -p project/source
+
           unzip -q project/project.zip -d project/source
+
+          echo "📂 Project berhasil diekstrak."
 
       - name: Find Flutter Project
         run: |
-          PROJECT_DIR=$(find project/source -name pubspec.yaml -printf '%h\n' | head -n 1)
+          set -e
+
+          PROJECT_DIR=$(find project/source \
+            -name pubspec.yaml \
+            -type f \
+            -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "❌ pubspec.yaml tidak ditemukan!"
+            echo "Pastikan ZIP berisi project Flutter."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Flutter project ditemukan:"
+
+          echo "✅ Flutter project ditemukan:"
           echo "$PROJECT_DIR"
 
       - name: Setup Java
@@ -82,22 +113,54 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Flutter Doctor
+        run: |
+          flutter --version
+          flutter doctor -v
+
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub get
+        run: |
+          flutter pub get
+
+      - name: Check Android Project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ ! -d "android" ]; then
+            echo "❌ Folder android tidak ditemukan!"
+            echo "Project harus merupakan project Flutter yang memiliki folder android."
+            exit 1
+          fi
+
+          echo "✅ Android project ditemukan."
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set -e
+
           if [ "${{ inputs.build_type }}" = "debug" ]; then
+            echo "🔧 Building DEBUG APK..."
             flutter build apk --debug
           else
+            echo "🚀 Building RELEASE APK..."
             flutter build apk --release
           fi
 
-      - name: Upload APK
+      - name: Find APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "📦 APK hasil build:"
+
+          find build/app/outputs/flutter-apk \
+            -type f \
+            -name "*.apk" \
+            -exec ls -lh {} \;
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.tag }}
           path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
+          retention-days: 7
