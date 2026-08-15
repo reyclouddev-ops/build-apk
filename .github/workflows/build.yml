@@ -2,6 +2,26 @@ name: Build APK
 
 on:
   workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL file ZIP project Flutter"
+        required: true
+        type: string
+
+      tag:
+        description: "Tag build"
+        required: false
+        default: "latest"
+        type: string
+
+      build_type:
+        description: "Build type"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
 
 permissions:
   contents: read
@@ -15,6 +35,24 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Download Project ZIP
+        run: |
+          mkdir -p project
+          curl -L "${{ inputs.zip_url }}" -o project/project.zip
+          unzip -q project/project.zip -d project/source
+
+      - name: Find Flutter Project
+        run: |
+          PROJECT_DIR=$(find project/source -name pubspec.yaml -printf '%h\n' | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Flutter project tidak ditemukan"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Flutter project: $PROJECT_DIR"
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -27,18 +65,29 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter Doctor
-        run: flutter doctor -v
-
       - name: Flutter Pub Get
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            flutter build apk --debug
+          else
+            flutter build apk --release
+          fi
+
+      - name: Find APK
+        run: |
+          find "${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk" \
+            -type f \
+            -name "*.apk" \
+            -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: apk-${{ inputs.tag }}
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
