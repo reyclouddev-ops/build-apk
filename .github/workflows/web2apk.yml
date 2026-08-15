@@ -51,7 +51,10 @@ jobs:
         run: |
           set -e
 
-          NAME=$(echo "$APP_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g' | sed 's/^[0-9]/app_/')
+          NAME=$(echo "$APP_NAME" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9_]/_/g' \
+            | sed 's/^[0-9]/app_/')
 
           if [ -z "$NAME" ]; then
             NAME="web_to_apk"
@@ -76,10 +79,9 @@ jobs:
           from pathlib import Path
           import os
 
-          p = Path("lib/main.dart")
-          url = os.environ["WEB_URL"].replace("\\", "\\\\").replace('"', '\\"')
+          url = os.environ["WEB_URL"]
 
-          text = f'''import 'package:flutter/material.dart';
+          main = f'''import 'package:flutter/material.dart';
           import 'package:webview_flutter/webview_flutter.dart';
 
           void main() {{
@@ -110,14 +112,13 @@ jobs:
                     }},
                   ),
                 )
-                ..loadRequest(Uri.parse("{url}"));
+                ..loadRequest(Uri.parse({url!r}));
             }}
 
             @override
             Widget build(BuildContext context) {{
               return MaterialApp(
                 debugShowCheckedModeBanner: false,
-                title: "Web2Apk",
                 home: Scaffold(
                   body: SafeArea(
                     child: WebViewWidget(
@@ -130,11 +131,9 @@ jobs:
           }}
           '''
 
-          p.write_text(text)
+          Path("lib/main.dart").write_text(main)
 
       - name: Configure Android
-        env:
-          APP_NAME: ${{ inputs.app_name }}
         run: |
           set -e
 
@@ -142,48 +141,35 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
-          import re
-          import os
 
           p = Path("android/app/src/main/AndroidManifest.xml")
           text = p.read_text()
 
+          permission = '    <uses-permission android:name="android.permission.INTERNET" />'
+
           if "android.permission.INTERNET" not in text:
-              match = re.search(r'(<manifest\b[^>]*>)', text, re.IGNORECASE)
-
-              if not match:
-                  raise SystemExit("Tag manifest tidak ditemukan.")
-
-              manifest_tag = match.group(1)
-
-              permission = '\n    <uses-permission android:name="android.permission.INTERNET" />'
-
-              text = text.replace(
-                  manifest_tag,
-                  manifest_tag + permission,
-                  1
-              )
-
-          app_name = os.environ["APP_NAME"].replace("&", "&amp;").replace('"', "&quot;")
-
-          text = re.sub(
-              r'<application\b([^>]*)android:label="[^"]*"([^>]*)>',
-              rf'<application\1android:label="{app_name}"\2>',
-              text,
-              count=1
-          )
-
-          if 'android:label=' not in text:
-              text = text.replace(
-                  '<application',
-                  f'<application android:label="{app_name}"',
-                  1
-              )
+              marker = '<application'
+              if marker in text:
+                  text = text.replace(
+                      marker,
+                      permission + "\n\n    " + marker,
+                      1
+                  )
+              else:
+                  raise SystemExit("Tag application tidak ditemukan")
 
           p.write_text(text)
           PY
 
-          cat android/app/src/main/AndroidManifest.xml
+          sed -n '1,80p' android/app/src/main/AndroidManifest.xml
+
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          ET.parse("android/app/src/main/AndroidManifest.xml")
+
+          print("AndroidManifest.xml valid")
+          PY
 
       - name: Download Icon
         env:
@@ -195,7 +181,7 @@ jobs:
 
           curl \
             --location \
-            --fail-with-body \
+            --fail \
             --retry 5 \
             --retry-delay 2 \
             --connect-timeout 30 \
@@ -218,41 +204,42 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
+          import yaml
 
           p = Path("pubspec.yaml")
-          text = p.read_text()
+          data = yaml.safe_load(p.read_text()) or {}
 
-          config = '''
-          flutter_launcher_icons:
-            android: true
-            ios: false
-            image_path: assets/icon.png
-            min_sdk_android: 21
-          '''
+          data["flutter_launcher_icons"] = {
+              "android": True,
+              "ios": False,
+              "image_path": "assets/icon.png",
+              "min_sdk_android": 21
+          }
 
-          if "flutter_launcher_icons:" not in text:
-              text += config
+          class Dumper(yaml.SafeDumper):
+              pass
 
-          p.write_text(text)
+          Dumper.ignore_aliases = lambda self, data: True
+
+          p.write_text(
+              yaml.safe_dump(
+                  data,
+                  sort_keys=False,
+                  allow_unicode=True,
+                  default_flow_style=False
+              )
+          )
           PY
+
+          echo "===== PUBSPEC ====="
+          cat pubspec.yaml
+
+          echo "===== ICON ====="
+          file assets/icon.png
 
           flutter pub get
 
-          dart run flutter_launcher_icons
-
-      - name: Validate Android Manifest
-        run: |
-          set -e
-
-          cd web_to_apk
-
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-
-          ET.parse("android/app/src/main/AndroidManifest.xml")
-
-          print("AndroidManifest.xml valid.")
-          PY
+          dart run flutter_launcher_icons -f pubspec.yaml
 
       - name: Build APK
         run: |
@@ -276,7 +263,7 @@ jobs:
           if [ ! -f "$APK" ]; then
             echo "APK tidak ditemukan."
 
-            find web_to_apk/build/app/outputs \
+            find web_to_apk/build \
               -type f \
               -name "*.apk" \
               -print \
