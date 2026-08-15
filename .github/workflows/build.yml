@@ -9,7 +9,7 @@ on:
         type: string
 
       tag:
-        description: "Tag build"
+        description: "Build tag"
         required: false
         default: "latest"
         type: string
@@ -44,8 +44,9 @@ jobs:
 
           mkdir -p project
 
-          if [ -z "$GH_TOKEN" ]; then
-            echo "❌ GH_PAT belum dibuat di Repository Secrets!"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "❌ GH_PAT tidak tersedia."
+            echo "Pastikan GH_PAT berada di Repository secrets."
             exit 1
           fi
 
@@ -53,9 +54,9 @@ jobs:
 
           curl -L \
             --fail-with-body \
-            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/octet-stream" \
-            "$ZIP_URL" \
+            "${ZIP_URL}" \
             -o project/project.zip
 
           echo "📁 File information:"
@@ -63,9 +64,7 @@ jobs:
           file project/project.zip
 
           if ! unzip -t project/project.zip >/dev/null 2>&1; then
-            echo "❌ File yang didownload bukan ZIP yang valid!"
-            echo "Response dari server:"
-            head -c 500 project/project.zip || true
+            echo "❌ File yang didownload bukan ZIP yang valid."
             exit 1
           fi
 
@@ -79,20 +78,21 @@ jobs:
 
           unzip -q project/project.zip -d project/source
 
-          echo "📂 Project berhasil diekstrak."
+          echo "✅ Project berhasil diekstrak."
 
       - name: Find Flutter Project
         run: |
           set -e
 
           PROJECT_DIR=$(find project/source \
-            -name pubspec.yaml \
             -type f \
-            -printf '%h\n' | head -n 1)
+            -name "pubspec.yaml" \
+            -printf '%h\n' \
+            | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan!"
-            echo "Pastikan ZIP berisi project Flutter."
+            echo "❌ pubspec.yaml tidak ditemukan."
+            echo "ZIP harus berisi project Flutter."
             exit 1
           fi
 
@@ -113,26 +113,106 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter Doctor
+      - name: Flutter Version
         run: |
           flutter --version
-          flutter doctor -v
+          dart --version
+
+      - name: Check Flutter Project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan."
+            exit 1
+          fi
+
+          if [ ! -d "android" ]; then
+            echo "❌ Folder android tidak ditemukan."
+            exit 1
+          fi
+
+          echo "✅ Flutter project valid."
+
+      - name: Fix Gradle Version
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          GRADLE_FILE="android/gradle/wrapper/gradle-wrapper.properties"
+
+          if [ ! -f "$GRADLE_FILE" ]; then
+            echo "❌ gradle-wrapper.properties tidak ditemukan."
+            exit 1
+          fi
+
+          echo "📌 Gradle sebelum:"
+          grep "distributionUrl" "$GRADLE_FILE" || true
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("android/gradle/wrapper/gradle-wrapper.properties")
+          text = path.read_text()
+
+          text = re.sub(
+              r'gradle-[0-9]+\.[0-9]+(?:\.[0-9]+)?-(?:bin|all)\.zip',
+              'gradle-8.14.0-bin.zip',
+              text
+          )
+
+          path.write_text(text)
+          PY
+
+          echo "📌 Gradle sesudah:"
+          grep "distributionUrl" "$GRADLE_FILE"
+
+      - name: Configure Flutter Android Compatibility
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+
+          PROPERTIES="android/gradle.properties"
+
+          touch "$PROPERTIES"
+
+          if grep -q "^android.newDsl=" "$PROPERTIES"; then
+            sed -i 's/^android.newDsl=.*/android.newDsl=false/' "$PROPERTIES"
+          else
+            echo "android.newDsl=false" >> "$PROPERTIES"
+          fi
+
+          if grep -q "^android.builtInKotlin=" "$PROPERTIES"; then
+            sed -i 's/^android.builtInKotlin=.*/android.builtInKotlin=false/' "$PROPERTIES"
+          else
+            echo "android.builtInKotlin=false" >> "$PROPERTIES"
+          fi
+
+          echo "📄 Android Gradle properties:"
+          cat "$PROPERTIES"
 
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set -e
+
           flutter pub get
 
-      - name: Check Android Project
+      - name: Flutter Analyze Suggestions
         working-directory: ${{ env.PROJECT_DIR }}
+        continue-on-error: true
         run: |
-          if [ ! -d "android" ]; then
-            echo "❌ Folder android tidak ditemukan!"
-            echo "Project harus merupakan project Flutter yang memiliki folder android."
-            exit 1
-          fi
+          flutter analyze --suggestions
 
-          echo "✅ Android project ditemukan."
+      - name: Verify Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          chmod +x gradlew
+
+          echo "📌 Gradle version:"
+          ./gradlew --version
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -147,12 +227,21 @@ jobs:
             flutter build apk --release
           fi
 
-      - name: Find APK
+      - name: Check APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          set -e
+
+          APK_DIR="build/app/outputs/flutter-apk"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "❌ Folder APK tidak ditemukan."
+            exit 1
+          fi
+
           echo "📦 APK hasil build:"
 
-          find build/app/outputs/flutter-apk \
+          find "$APK_DIR" \
             -type f \
             -name "*.apk" \
             -exec ls -lh {} \;
