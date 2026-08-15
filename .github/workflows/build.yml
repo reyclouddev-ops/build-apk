@@ -7,13 +7,11 @@ on:
         description: "URL file ZIP project Flutter"
         required: true
         type: string
-
       tag:
         description: "Tag build"
         required: false
         default: "latest"
         type: string
-
       build_type:
         description: "Build type"
         required: false
@@ -32,13 +30,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download Project ZIP
+        env:
+          ZIP_URL: ${{ inputs.zip_url }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p project
-          curl -L "${{ inputs.zip_url }}" -o project/project.zip
+
+          curl -L \
+            --fail-with-body \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "$ZIP_URL" \
+            -o project/project.zip
+
+          echo "Ukuran file:"
+          ls -lh project/project.zip
+
+          file project/project.zip
+
+      - name: Extract Project
+        run: |
+          mkdir -p project/source
           unzip -q project/project.zip -d project/source
 
       - name: Find Flutter Project
@@ -46,12 +62,13 @@ jobs:
           PROJECT_DIR=$(find project/source -name pubspec.yaml -printf '%h\n' | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "Flutter project tidak ditemukan"
+            echo "❌ pubspec.yaml tidak ditemukan!"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Flutter project: $PROJECT_DIR"
+          echo "Flutter project ditemukan:"
+          echo "$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -77,13 +94,6 @@ jobs:
           else
             flutter build apk --release
           fi
-
-      - name: Find APK
-        run: |
-          find "${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk" \
-            -type f \
-            -name "*.apk" \
-            -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
