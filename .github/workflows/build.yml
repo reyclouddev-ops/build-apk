@@ -66,6 +66,67 @@ jobs:
             exit 1
           fi
 
+          echo "ZIP URL:"
+          echo "$ZIP_URL"
+
+          DOWNLOAD_URL="$ZIP_URL"
+
+          if echo "$ZIP_URL" | grep -q "github.com/.*/releases/download/"; then
+            RELEASE_PATH=$(echo "$ZIP_URL" | sed -E 's#https://github.com/([^/]+/[^/]+)/releases/download/(.*)#\1|\2#')
+
+            REPO=$(echo "$RELEASE_PATH" | cut -d'|' -f1)
+            RELEASE_PART=$(echo "$RELEASE_PATH" | cut -d'|' -f2)
+
+            TAG_NAME=$(echo "$RELEASE_PART" | sed 's#/.*##')
+            ASSET_NAME=$(echo "$RELEASE_PART" | sed "s#^[^/]*/##")
+
+            echo "Repository: $REPO"
+            echo "Tag: $TAG_NAME"
+            echo "Asset: $ASSET_NAME"
+
+            RELEASE_JSON=$(curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --retry 5 \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 120 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "User-Agent: FlutterBuildBot/1.0" \
+              "https://api.github.com/repos/$REPO/releases/tags/$TAG_NAME")
+
+            ASSET_ID=$(echo "$RELEASE_JSON" | python3 -c "
+          import sys,json
+          data=json.load(sys.stdin)
+          name=sys.argv[1]
+          assets=data.get('assets',[])
+          found=next((x for x in assets if x.get('name')==name),None)
+          print(found.get('id','') if found else '')
+          " "$ASSET_NAME")
+
+            if [ -z "$ASSET_ID" ]; then
+              echo "Asset $ASSET_NAME tidak ditemukan."
+              echo "$RELEASE_JSON" | python3 -c "
+          import sys,json
+          data=json.load(sys.stdin)
+          print('Assets yang tersedia:')
+          for x in data.get('assets',[]):
+              print('-',x.get('name'),x.get('id'))
+          "
+              exit 1
+            fi
+
+            DOWNLOAD_URL="https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID"
+
+            echo "API Asset URL:"
+            echo "$DOWNLOAD_URL"
+          fi
+
+          rm -f project/project.zip
+
           curl \
             --location \
             --fail-with-body \
@@ -76,11 +137,15 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
             -H "User-Agent: FlutterBuildBot/1.0" \
-            "$ZIP_URL" \
+            "$DOWNLOAD_URL" \
             --output project/project.zip
 
           test -s project/project.zip
 
+          echo "Ukuran ZIP:"
+          ls -lh project/project.zip
+
+          echo "Tipe file:"
           file project/project.zip
 
           unzip -t project/project.zip
@@ -103,6 +168,7 @@ jobs:
           if [ -z "$PUBSPEC" ]; then
             echo "pubspec.yaml tidak ditemukan."
 
+            echo "Struktur project:"
             find project/source \
               -maxdepth 6 \
               -type f \
@@ -190,18 +256,18 @@ jobs:
           test -d android
 
           if [ -f "android/settings.gradle.kts" ]; then
-            true
+            echo "settings.gradle.kts ditemukan."
           elif [ -f "android/settings.gradle" ]; then
-            true
+            echo "settings.gradle ditemukan."
           else
             echo "Android settings tidak ditemukan."
             exit 1
           fi
 
           if [ -f "android/app/build.gradle.kts" ]; then
-            true
+            echo "build.gradle.kts ditemukan."
           elif [ -f "android/app/build.gradle" ]; then
-            true
+            echo "build.gradle ditemukan."
           else
             echo "Android app Gradle file tidak ditemukan."
             exit 1
@@ -279,6 +345,11 @@ jobs:
           set -e
 
           cd "$PROJECT_DIR"
+
+          echo "Tag: $BUILD_TAG"
+          echo "Build Type: $BUILD_TYPE"
+          echo "Project: $PROJECT_DIR"
+          echo "Entry Point: $ENTRY_POINT"
 
           flutter clean
           flutter pub get
@@ -379,19 +450,11 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$BUILD_TAG" ]; then
-            echo "BUILD_TAG belum tersedia."
-            exit 1
-          fi
-
           REPO="$GITHUB_REPOSITORY"
-
-          BODY_FILE=$(mktemp)
 
           HTTP_CODE=$(curl \
             --silent \
-            --show-error \
-            --output "$BODY_FILE" \
+            --output release.json \
             --write-out "%{http_code}" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -399,53 +462,24 @@ jobs:
             -H "User-Agent: FlutterBuildBot/1.0" \
             "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
 
-          RESPONSE=$(cat "$BODY_FILE")
-          rm -f "$BODY_FILE"
-
           if [ "$HTTP_CODE" = "200" ]; then
-
-            RELEASE_ID=$(echo "$RESPONSE" | python3 -c \
-              "import sys,json; print(json.load(sys.stdin).get('id',''))")
-
-            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c \
-              "import sys,json; print(json.load(sys.stdin).get('upload_url','').split('{')[0])")
-
-          elif [ "$HTTP_CODE" = "404" ]; then
-
-            CREATE_FILE=$(mktemp)
-
-            CREATE_CODE=$(curl \
+            RELEASE_ID=$(python3 -c "import json; print(json.load(open('release.json')).get('id',''))")
+            UPLOAD_URL=$(python3 -c "import json; print(json.load(open('release.json')).get('upload_url','').split('{')[0])")
+          else
+            RESPONSE=$(curl \
               --silent \
               --show-error \
-              --output "$CREATE_FILE" \
-              --write-out "%{http_code}" \
+              --fail-with-body \
               -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "User-Agent: FlutterBuildBot/1.0" \
               "https://api.github.com/repos/$REPO/releases" \
-              -d "$(python3 -c 'import json,os; print(json.dumps({"tag_name":os.environ["BUILD_TAG"],"name":"Build "+os.environ["BUILD_TAG"],"draft":False,"prerelease":True}))')")
+              -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":false,\"prerelease\":true}")
 
-            CREATE_RESPONSE=$(cat "$CREATE_FILE")
-            rm -f "$CREATE_FILE"
-
-            if [ "$CREATE_CODE" != "201" ]; then
-              echo "$CREATE_RESPONSE"
-              exit 1
-            fi
-
-            RELEASE_ID=$(echo "$CREATE_RESPONSE" | python3 -c \
-              "import sys,json; print(json.load(sys.stdin).get('id',''))")
-
-            UPLOAD_URL=$(echo "$CREATE_RESPONSE" | python3 -c \
-              "import sys,json; print(json.load(sys.stdin).get('upload_url','').split('{')[0])")
-
-          else
-
-            echo "$RESPONSE"
-            exit 1
-
+            RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
           fi
 
           if [ -z "$RELEASE_ID" ]; then
@@ -457,9 +491,6 @@ jobs:
             echo "Upload URL tidak ditemukan."
             exit 1
           fi
-
-          echo "Release ID: $RELEASE_ID"
-          echo "Upload URL: $UPLOAD_URL"
 
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
@@ -475,76 +506,42 @@ jobs:
           APK="$PROJECT_DIR/build/final/release.apk"
 
           test -f "$APK"
-          test -n "$UPLOAD_URL"
+
+          FILE_NAME="app-${{ inputs.tag }}.apk"
 
           curl \
             --silent \
             --show-error \
             --fail-with-body \
+            --retry 5 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 600 \
             -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/vnd.android.package-archive" \
             -H "User-Agent: FlutterBuildBot/1.0" \
-            "$UPLOAD_URL?name=release.apk" \
-            --data-binary "@$APK"
+            --data-binary "@$APK" \
+            "$UPLOAD_URL?name=$FILE_NAME"
 
-      - name: Verify GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          BUILD_TAG: ${{ inputs.tag }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
         run: |
           set -e
 
-          REPO="$GITHUB_REPOSITORY"
-
-          RESPONSE=$(curl \
+          curl \
             --silent \
             --show-error \
-            --fail \
+            --fail-with-body \
+            -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "User-Agent: FlutterBuildBot/1.0" \
-            "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -d '{"draft":false}'
 
-          RELEASE_URL=$(echo "$RESPONSE" | python3 -c \
-            "import sys,json; print(json.load(sys.stdin).get('html_url',''))")
-
-          ASSET_URL=$(echo "$RESPONSE" | python3 -c \
-            "import sys,json; a=json.load(sys.stdin).get('assets',[]); print(a[0].get('browser_download_url','') if a else '')")
-
-          if [ -z "$RELEASE_URL" ]; then
-            echo "Release URL tidak ditemukan."
-            exit 1
-          fi
-
-          if [ -z "$ASSET_URL" ]; then
-            echo "APK release asset tidak ditemukan."
-            exit 1
-          fi
-
-          echo "Release URL:"
-          echo "$RELEASE_URL"
-
-          echo "APK URL:"
-          echo "$ASSET_URL"
-
-          echo "release_url=$RELEASE_URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "apk_url=$ASSET_URL" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Post Setup Flutter
-        if: always()
-        run: true
-
-      - name: Post Setup Java
-        if: always()
-        run: true
-
-      - name: Post Checkout
-        if: always()
-        run: true
-
-      - name: Complete job
-        if: always()
-        run: true
+          echo "Release berhasil dipublish."
