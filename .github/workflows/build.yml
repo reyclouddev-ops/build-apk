@@ -1,25 +1,7 @@
-name: Build APK
+name: Build Flutter APK
 
 on:
   workflow_dispatch:
-    inputs:
-      zip_url:
-        description: "URL GitHub Release Asset ZIP"
-        required: true
-        type: string
-      tag:
-        description: "Build tag"
-        required: false
-        default: "latest"
-        type: string
-      build_type:
-        description: "Build type"
-        required: false
-        default: "release"
-        type: choice
-        options:
-          - release
-          - debug
 
 permissions:
   contents: read
@@ -28,176 +10,127 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      PROJECT_DIR: project/source
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Download Project ZIP
-        env:
-          ZIP_URL: ${{ inputs.zip_url }}
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          set -e
-          mkdir -p project
-
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "GH_PAT tidak tersedia."
-            exit 1
-          fi
-
-          curl -L \
-            --retry 5 \
-            --retry-delay 3 \
-            --fail-with-body \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/octet-stream" \
-            "$ZIP_URL" \
-            -o project/project.zip
-
-          file project/project.zip
-          unzip -t project/project.zip >/dev/null
-
-      - name: Extract Project
-        run: |
-          set -e
-          mkdir -p project/source
-          unzip -q project/project.zip -d project/source
-
-      - name: Find Flutter Project
-        run: |
-          set -e
-
-          PROJECT_DIR=$(find project/source \
-            -type f \
-            -name "pubspec.yaml" \
-            -printf '%h\n' \
-            | head -n 1)
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "pubspec.yaml tidak ditemukan."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "PROJECT_DIR=$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.47.0'
           channel: stable
           cache: true
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.14.0"
-
-      - name: Verify Environment
+      - name: Download Project
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ZIP_URL: ${{ inputs.zip_url }}
         run: |
           set -e
-          java -version
-          flutter --version
-          gradle --version
+
+          mkdir -p project
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_PAT belum tersedia"
+            exit 1
+          fi
+
+          if [ -z "$ZIP_URL" ]; then
+            echo "ZIP_URL belum tersedia"
+            exit 1
+          fi
+
+          curl -L \
+            --fail-with-body \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "$ZIP_URL" \
+            -o project/project.zip
+
+          file project/project.zip
+
+          unzip -t project/project.zip
+
+          mkdir -p project/source
+          unzip -q project/project.zip -d project/source
 
       - name: Prepare Flutter
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
+
+          flutter --version
           flutter pub get
 
-      - name: Fix Gradle
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14'
+
+      - name: Prepare Gradle
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
-          FILE="android/gradle/wrapper/gradle-wrapper.properties"
+          mkdir -p android/gradle/wrapper
 
-          if [ -f "$FILE" ]; then
-            python3 <<'PY'
-          from pathlib import Path
-          import re
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
+          networkTimeout=120000
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
 
-          path = Path("android/gradle/wrapper/gradle-wrapper.properties")
-          text = path.read_text()
-
-          text = re.sub(
-              r'gradle-[0-9.]+-(?:bin|all)\.zip',
-              'gradle-8.14.0-bin.zip',
-              text
-          )
-
-          text = re.sub(
-              r'https?://[^/]+/distributions/',
-              'https://downloads.gradle.org/distributions/',
-              text
-          )
-
-          path.write_text(text)
-          PY
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
           fi
 
-          if [ -f "android/gradle.properties" ]; then
-            sed -i '/^android.newDsl=/d' android/gradle.properties
-            sed -i '/^android.builtInKotlin=/d' android/gradle.properties
-          fi
+          gradle --version
 
-      - name: Configure Android
+      - name: Check Flutter Project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
-          touch android/gradle.properties
+          test -f pubspec.yaml
+          test -d android
+          test -f android/app/build.gradle.kts || test -f android/app/build.gradle
 
-          if ! grep -q "^android.newDsl=" android/gradle.properties; then
-            echo "android.newDsl=false" >> android/gradle.properties
-          fi
-
-      - name: Generate Flutter Build Files
+      - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
+
           flutter clean
           flutter pub get
 
-      - name: Build APK
-        working-directory: ${{ env.PROJECT_DIR }}/android
-        env:
-          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
-        run: |
-          set -e
+          flutter build apk \
+            --release \
+            --android-skip-build-dependency-validation
 
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            assembleRelease
-
-      - name: Verify APK
+      - name: Find APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
-          APK="build/app/outputs/flutter-apk/app-release.apk"
-
-          if [ ! -f "$APK" ]; then
-            echo "APK tidak ditemukan."
-            find build -type f -name "*.apk" -print || true
-            exit 1
-          fi
-
-          echo "APK berhasil dibuat:"
-          ls -lh "$APK"
+          find build/app/outputs -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ inputs.tag }}
-          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/*.apk
+          name: flutter-release-apk
+          path: |
+            ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/*.apk
           if-no-files-found: error
           retention-days: 7
