@@ -7,11 +7,13 @@ on:
         description: "URL GitHub Release Asset ZIP"
         required: true
         type: string
+
       tag:
         description: "Build tag"
         required: false
         default: "latest"
         type: string
+
       build_type:
         description: "Build type"
         required: false
@@ -26,11 +28,10 @@ permissions:
 
 jobs:
   build:
-    name: Build Flutter APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Download Project ZIP
@@ -48,25 +49,24 @@ jobs:
           fi
 
           curl -L \
+            --retry 5 \
+            --retry-delay 3 \
             --fail-with-body \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/octet-stream" \
-            "${ZIP_URL}" \
+            "$ZIP_URL" \
             -o project/project.zip
 
-          ls -lh project/project.zip
           file project/project.zip
 
-          if ! unzip -t project/project.zip >/dev/null 2>&1; then
-            echo "File yang didownload bukan ZIP yang valid."
-            exit 1
-          fi
+          unzip -t project/project.zip >/dev/null
 
       - name: Extract Project
         run: |
           set -e
 
           mkdir -p project/source
+
           unzip -q project/project.zip -d project/source
 
       - name: Find Flutter Project
@@ -80,11 +80,14 @@ jobs:
             | head -n 1)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "pubspec.yaml tidak ditemukan."
+            echo "Flutter project tidak ditemukan."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Project:"
+          echo "$PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -98,6 +101,19 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14"
+
+      - name: Verify Tools
+        run: |
+          set -e
+
+          java -version
+          flutter --version
+          gradle --version
+
       - name: Validate Project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -105,28 +121,38 @@ jobs:
 
           test -f pubspec.yaml
           test -d android
-          test -f android/gradle/wrapper/gradle-wrapper.properties
 
-      - name: Fix Gradle
+      - name: Fix Gradle Wrapper
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
+
+          FILE="android/gradle/wrapper/gradle-wrapper.properties"
 
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           path = Path("android/gradle/wrapper/gradle-wrapper.properties")
+
           text = path.read_text()
 
           text = re.sub(
-              r'gradle-[0-9]+\.[0-9]+(?:\.[0-9]+)?-(?:bin|all)\.zip',
+              r'https?://[^\\s]+/distributions/gradle-[^\\s]+\\.zip',
+              'https://services.gradle.org/distributions/gradle-8.14.0-bin.zip',
+              text
+          )
+
+          text = re.sub(
+              r'gradle-[0-9]+\\.[0-9]+(?:\\.[0-9]+)?-(?:bin|all)\\.zip',
               'gradle-8.14.0-bin.zip',
               text
           )
 
           path.write_text(text)
           PY
+
+          cat "$FILE"
 
       - name: Fix Kotlin
         working-directory: ${{ env.PROJECT_DIR }}
@@ -141,26 +167,7 @@ jobs:
               Path("android/settings.gradle"),
               Path("android/settings.gradle.kts"),
               Path("android/build.gradle"),
-              Path("android/build.gradle.kts"),
-          ]
-
-          patterns = [
-              (
-                  r'(id\s*\(\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)\s*version\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>2.2.21\g<2>'
-              ),
-              (
-                  r'(id\s*["\']org\.jetbrains\.kotlin\.android["\']\s*version\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>2.2.21\g<2>'
-              ),
-              (
-                  r'(kotlin\(["\']android["\']\)\s*version\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>2.2.21\g<2>'
-              ),
-              (
-                  r'(org\.jetbrains\.kotlin\.android\s*:\s*)[0-9.]+',
-                  r'\g<1>2.2.21'
-              )
+              Path("android/build.gradle.kts")
           ]
 
           for path in files:
@@ -169,8 +176,23 @@ jobs:
 
               text = path.read_text()
 
-              for pattern, replacement in patterns:
-                  text = re.sub(pattern, replacement, text)
+              text = re.sub(
+                  r'(org\\.jetbrains\\.kotlin\\.android["\\']?\\s+version\\s+["\\'])[0-9.]+(["\\'])',
+                  r'\\g<1>2.2.21\\g<2>',
+                  text
+              )
+
+              text = re.sub(
+                  r'(id\\(["\\']org\\.jetbrains\\.kotlin\\.android["\\']\\)\\s+version\\s+["\\'])[0-9.]+(["\\'])',
+                  r'\\g<1>2.2.21\\g<2>',
+                  text
+              )
+
+              text = re.sub(
+                  r'(kotlin\\(["\\']android["\\']\\)\\s+version\\s+["\\'])[0-9.]+(["\\'])',
+                  r'\\g<1>2.2.21\\g<2>',
+                  text
+              )
 
               path.write_text(text)
           PY
@@ -180,20 +202,20 @@ jobs:
         run: |
           set -e
 
-          PROPERTIES="android/gradle.properties"
+          FILE="android/gradle.properties"
 
-          touch "$PROPERTIES"
+          touch "$FILE"
 
-          if grep -q "^android.newDsl=" "$PROPERTIES"; then
-            sed -i 's/^android.newDsl=.*/android.newDsl=false/' "$PROPERTIES"
+          if grep -q "^android.newDsl=" "$FILE"; then
+            sed -i 's/^android.newDsl=.*/android.newDsl=false/' "$FILE"
           else
-            echo "android.newDsl=false" >> "$PROPERTIES"
+            echo "android.newDsl=false" >> "$FILE"
           fi
 
-          if grep -q "^android.builtInKotlin=" "$PROPERTIES"; then
-            sed -i 's/^android.builtInKotlin=.*/android.builtInKotlin=false/' "$PROPERTIES"
+          if grep -q "^android.builtInKotlin=" "$FILE"; then
+            sed -i 's/^android.builtInKotlin=.*/android.builtInKotlin=false/' "$FILE"
           else
-            echo "android.builtInKotlin=false" >> "$PROPERTIES"
+            echo "android.builtInKotlin=false" >> "$FILE"
           fi
 
       - name: Flutter Pub Get
@@ -202,20 +224,25 @@ jobs:
           set -e
           flutter pub get
 
-      - name: Prepare Gradle Wrapper
+      - name: Prepare Gradle
         working-directory: ${{ env.PROJECT_DIR }}/android
         run: |
           set -e
 
           chmod +x gradlew
 
-          echo "Gradle wrapper:"
-          grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties
+          echo "Gradle wrapper configured:"
+          grep distributionUrl gradle/wrapper/gradle-wrapper.properties
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
         run: |
           set -e
+
+          flutter clean
+          flutter pub get
 
           if [ "${{ inputs.build_type }}" = "debug" ]; then
             flutter build apk --debug
@@ -223,7 +250,7 @@ jobs:
             flutter build apk --release
           fi
 
-      - name: Check APK
+      - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
@@ -231,14 +258,7 @@ jobs:
           APK_DIR="build/app/outputs/flutter-apk"
 
           if [ ! -d "$APK_DIR" ]; then
-            echo "Folder APK tidak ditemukan."
-            exit 1
-          fi
-
-          APK_COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "APK tidak ditemukan."
+            echo "APK directory tidak ditemukan."
             exit 1
           fi
 
@@ -247,7 +267,16 @@ jobs:
             -name "*.apk" \
             -exec ls -lh {} \;
 
-      - name: Upload APK Artifact
+          COUNT=$(find "$APK_DIR" -type f -name "*.apk" | wc -l)
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "APK tidak ditemukan."
+            exit 1
+          fi
+
+          echo "APK berhasil dibuat."
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.tag }}
