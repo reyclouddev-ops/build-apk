@@ -32,8 +32,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+
+      # ============================================================
+      # DOWNLOAD ZIP
+      # ============================================================
 
       - name: Download Project ZIP
         env:
@@ -61,6 +71,7 @@ jobs:
 
           echo "📁 File information:"
           ls -lh project/project.zip
+
           file project/project.zip
 
           if ! unzip -t project/project.zip >/dev/null 2>&1; then
@@ -69,6 +80,11 @@ jobs:
           fi
 
           echo "✅ ZIP valid."
+
+
+      # ============================================================
+      # EXTRACT
+      # ============================================================
 
       - name: Extract Project
         run: |
@@ -79,6 +95,11 @@ jobs:
           unzip -q project/project.zip -d project/source
 
           echo "✅ Project berhasil diekstrak."
+
+
+      # ============================================================
+      # FIND FLUTTER PROJECT
+      # ============================================================
 
       - name: Find Flutter Project
         run: |
@@ -101,11 +122,21 @@ jobs:
           echo "✅ Flutter project ditemukan:"
           echo "$PROJECT_DIR"
 
+
+      # ============================================================
+      # JAVA
+      # ============================================================
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+
+
+      # ============================================================
+      # FLUTTER
+      # ============================================================
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -113,12 +144,18 @@ jobs:
           channel: stable
           cache: true
 
+
       - name: Flutter Version
         run: |
           flutter --version
           dart --version
 
-      - name: Check Flutter Project
+
+      # ============================================================
+      # CHECK PROJECT
+      # ============================================================
+
+      - name: Validate Flutter Project
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
@@ -133,28 +170,38 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "android/gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "❌ Gradle wrapper tidak ditemukan."
+            exit 1
+          fi
+
           echo "✅ Flutter project valid."
 
-      - name: Fix Gradle Version
+
+      # ============================================================
+      # FIX GRADLE + KOTLIN
+      # ============================================================
+
+      - name: Fix Gradle and Kotlin Compatibility
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
+          echo "========================================"
+          echo " FIX ANDROID BUILD CONFIGURATION"
+          echo "========================================"
+
           GRADLE_FILE="android/gradle/wrapper/gradle-wrapper.properties"
 
-          if [ ! -f "$GRADLE_FILE" ]; then
-            echo "❌ gradle-wrapper.properties tidak ditemukan."
-            exit 1
-          fi
-
-          echo "📌 Gradle sebelum:"
-          grep "distributionUrl" "$GRADLE_FILE" || true
+          echo ""
+          echo "🔧 Fix Gradle..."
 
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           path = Path("android/gradle/wrapper/gradle-wrapper.properties")
+
           text = path.read_text()
 
           text = re.sub(
@@ -166,10 +213,82 @@ jobs:
           path.write_text(text)
           PY
 
-          echo "📌 Gradle sesudah:"
-          grep "distributionUrl" "$GRADLE_FILE"
+          echo "Gradle configuration:"
+          grep "distributionUrl" "$GRADLE_FILE" || true
 
-      - name: Configure Flutter Android Compatibility
+
+          echo ""
+          echo "🔧 Fix Kotlin Gradle Plugin..."
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          files = [
+              Path("android/settings.gradle"),
+              Path("android/settings.gradle.kts"),
+              Path("android/build.gradle"),
+              Path("android/build.gradle.kts"),
+          ]
+
+          for path in files:
+
+              if not path.exists():
+                  continue
+
+              text = path.read_text()
+
+              patterns = [
+
+                  (
+                      r'(id\s*\(\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)\s*version\s*["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  ),
+
+                  (
+                      r'(id\s*["\']org\.jetbrains\.kotlin\.android["\']\s*version\s*["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  ),
+
+                  (
+                      r'(kotlin\(["\']android["\']\)\s*version\s*["\'])[0-9.]+(["\'])',
+                      r'\g<1>2.2.21\g<2>'
+                  ),
+
+                  (
+                      r'(org\.jetbrains\.kotlin\.android\s*:\s*)[0-9.]+',
+                      r'\g<1>2.2.21'
+                  ),
+
+              ]
+
+              for pattern, replacement in patterns:
+                  text = re.sub(
+                      pattern,
+                      replacement,
+                      text
+                  )
+
+              path.write_text(text)
+          PY
+
+          echo ""
+          echo "Kotlin configuration:"
+
+          grep -R -n \
+            -E "kotlin|org.jetbrains.kotlin" \
+            android/settings.gradle \
+            android/settings.gradle.kts \
+            android/build.gradle \
+            android/build.gradle.kts \
+            2>/dev/null || true
+
+
+      # ============================================================
+      # ANDROID COMPATIBILITY
+      # ============================================================
+
+      - name: Configure Android Compatibility
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
@@ -178,54 +297,129 @@ jobs:
 
           touch "$PROPERTIES"
 
+          echo "🔧 Configuring Android compatibility..."
+
           if grep -q "^android.newDsl=" "$PROPERTIES"; then
-            sed -i 's/^android.newDsl=.*/android.newDsl=false/' "$PROPERTIES"
+            sed -i \
+              's/^android.newDsl=.*/android.newDsl=false/' \
+              "$PROPERTIES"
           else
             echo "android.newDsl=false" >> "$PROPERTIES"
           fi
 
           if grep -q "^android.builtInKotlin=" "$PROPERTIES"; then
-            sed -i 's/^android.builtInKotlin=.*/android.builtInKotlin=false/' "$PROPERTIES"
+            sed -i \
+              's/^android.builtInKotlin=.*/android.builtInKotlin=false/' \
+              "$PROPERTIES"
           else
             echo "android.builtInKotlin=false" >> "$PROPERTIES"
           fi
 
-          echo "📄 Android Gradle properties:"
+          echo ""
+          echo "📄 Android properties:"
           cat "$PROPERTIES"
+
+
+      # ============================================================
+      # PUB GET
+      # ============================================================
 
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
+          echo "📦 Running flutter pub get..."
+
           flutter pub get
 
-      - name: Flutter Analyze Suggestions
-        working-directory: ${{ env.PROJECT_DIR }}
-        continue-on-error: true
-        run: |
-          flutter analyze --suggestions
 
-      - name: Verify Gradle Wrapper
+      # ============================================================
+      # GRADLE WRAPPER
+      # ============================================================
+
+      - name: Prepare Gradle Wrapper
         working-directory: ${{ env.PROJECT_DIR }}/android
         run: |
+          set -e
+
           chmod +x gradlew
 
           echo "📌 Gradle version:"
           ./gradlew --version
+
+
+      # ============================================================
+      # CHECK ANDROID CONFIG
+      # ============================================================
+
+      - name: Check Android Configuration
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo ""
+          echo "========================================"
+          echo " ANDROID CONFIGURATION"
+          echo "========================================"
+
+          echo ""
+          echo "Gradle:"
+          grep "distributionUrl" \
+            android/gradle/wrapper/gradle-wrapper.properties \
+            || true
+
+          echo ""
+          echo "Kotlin:"
+          grep -R -n \
+            -E "kotlin.*version|org.jetbrains.kotlin" \
+            android \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            2>/dev/null || true
+
+          echo ""
+          echo "Android Gradle Plugin:"
+          grep -R -n \
+            -E "com.android.application|com.android.library" \
+            android \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            2>/dev/null || true
+
+
+      # ============================================================
+      # BUILD APK
+      # ============================================================
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
 
+          echo ""
+          echo "========================================"
+          echo " BUILD APK"
+          echo "========================================"
+
           if [ "${{ inputs.build_type }}" = "debug" ]; then
+
             echo "🔧 Building DEBUG APK..."
-            flutter build apk --debug
+
+            flutter build apk \
+              --debug
+
           else
+
             echo "🚀 Building RELEASE APK..."
-            flutter build apk --release
+
+            flutter build apk \
+              --release
+
           fi
+
+
+      # ============================================================
+      # CHECK APK
+      # ============================================================
 
       - name: Check APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -239,12 +433,33 @@ jobs:
             exit 1
           fi
 
-          echo "📦 APK hasil build:"
+          echo ""
+          echo "========================================"
+          echo " APK RESULT"
+          echo "========================================"
 
           find "$APK_DIR" \
             -type f \
             -name "*.apk" \
             -exec ls -lh {} \;
+
+          APK_COUNT=$(find "$APK_DIR" \
+            -type f \
+            -name "*.apk" \
+            | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "❌ APK tidak ditemukan."
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ APK berhasil dibuat."
+
+
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
