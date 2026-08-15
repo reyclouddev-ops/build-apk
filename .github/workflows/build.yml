@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: Flutter project ZIP asset URL
+        description: Flutter project ZIP URL
         required: true
         type: string
       tag:
@@ -18,15 +18,16 @@ on:
         type: string
 
 permissions:
-  contents: read
-  actions: read
+  contents: write
+  actions: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     env:
-      PROJECT_DIR: project/source
+      FLUTTER_VERSION: "3.47.0"
+      JAVA_VERSION: "17"
 
     steps:
       - name: Checkout
@@ -36,22 +37,25 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+          cache: gradle
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.47.0"
           channel: stable
           cache: true
 
-      - name: Download Project ZIP
+      - name: Download Project
         env:
-          ZIP_URL: ${{ inputs.zip_url }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          ZIP_URL: ${{ inputs.zip_url }}
         run: |
           set -e
 
-          mkdir -p project
+          rm -rf project
+          mkdir -p project/source
 
           if [ -z "$GH_TOKEN" ]; then
             echo "GH_PAT belum tersedia."
@@ -63,199 +67,383 @@ jobs:
             exit 1
           fi
 
-          echo "Downloading project ZIP..."
-
-          curl -L \
+          curl \
+            --location \
             --fail-with-body \
             --retry 5 \
             --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 600 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
             -H "User-Agent: FlutterBuildBot/1.0" \
             "$ZIP_URL" \
-            -o project/project.zip
+            --output project/project.zip
 
-          echo "File information:"
-          ls -lh project/project.zip
+          test -s project/project.zip
+
           file project/project.zip
 
-          echo "Testing ZIP..."
-
-          if ! unzip -t project/project.zip >/dev/null 2>&1; then
-            echo "ZIP project tidak valid."
-
-            echo "Response:"
-            head -c 1000 project/project.zip || true
-
-            exit 1
-          fi
-
-          echo "ZIP valid."
-
-      - name: Extract Project
-        run: |
-          set -e
-
-          mkdir -p project/source
+          unzip -t project/project.zip
 
           unzip -q project/project.zip -d project/source
 
-          echo "Project contents:"
-          find project/source -maxdepth 2 -type f | head -100
+          echo "Project ZIP berhasil diekstrak."
 
       - name: Detect Flutter Project
+        id: detect
         run: |
           set -e
 
-          if [ ! -f "${PROJECT_DIR}/pubspec.yaml" ]; then
-            FOUND=$(find project/source -type f -name pubspec.yaml -print -quit)
+          PUBSPEC=$(find project/source \
+            -type f \
+            -name "pubspec.yaml" \
+            -print \
+            -quit)
 
-            if [ -z "$FOUND" ]; then
-              echo "pubspec.yaml tidak ditemukan."
-              exit 1
-            fi
+          if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan."
 
-            PROJECT_PATH=$(dirname "$FOUND")
+            echo "Struktur project:"
+            find project/source \
+              -maxdepth 6 \
+              -type f \
+              -print \
+              | sort \
+              | head -300
 
-            echo "PROJECT_DIR=$PROJECT_PATH" >> "$GITHUB_ENV"
-
-            echo "Flutter project ditemukan:"
-            echo "$PROJECT_PATH"
-          else
-            echo "Flutter project:"
-            echo "$PROJECT_DIR"
-          fi
-
-      - name: Verify Flutter
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          echo "Flutter:"
-          flutter --version
-
-          echo "Project:"
-          flutter doctor -v
-
-      - name: Install Dependencies
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          flutter pub get
-
-      - name: Prepare Gradle
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
-
-          if [ ! -d android ]; then
-            echo "Folder android tidak ditemukan."
             exit 1
           fi
 
-          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i 's#gradle-[0-9.]*-bin.zip#gradle-8.14-bin.zip#g' \
-              android/gradle/wrapper/gradle-wrapper.properties
+          PROJECT_DIR=$(dirname "$PUBSPEC")
+
+          echo "Flutter project ditemukan:"
+          echo "$PROJECT_DIR"
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Flutter
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "================================"
+          echo "Flutter Environment"
+          echo "================================"
+
+          flutter --version
+
+          echo "================================"
+          echo "Pub Get"
+          echo "================================"
+
+          flutter pub get
+
+      - name: Detect Entry Point
+        id: entry
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ENTRY=""
+
+          if [ -f "lib/main.dart" ]; then
+            ENTRY="lib/main.dart"
+          else
+            ENTRY=$(find lib \
+              -type f \
+              -name "*.dart" \
+              -print0 2>/dev/null \
+              | xargs -0 grep -l "void main(" 2>/dev/null \
+              | head -1 || true)
           fi
+
+          if [ -z "$ENTRY" ]; then
+            echo "Entry point Flutter tidak ditemukan."
+
+            echo "File Dart yang ditemukan:"
+            find lib \
+              -type f \
+              -name "*.dart" \
+              -print \
+              2>/dev/null \
+              | sort || true
+
+            exit 1
+          fi
+
+          echo "Entry point:"
+          echo "$ENTRY"
+
+          echo "entry_point=$ENTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Android Platform
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ ! -d "android" ]; then
+            echo "Folder android tidak ditemukan."
+            echo "Membuat Android project..."
+
+            flutter create \
+              --platforms=android \
+              --project-name flutter_build_app \
+              .
+
+          else
+            echo "Folder android ditemukan."
+          fi
+
+          test -d android
+
+          if [ -f "android/settings.gradle.kts" ]; then
+            echo "settings.gradle.kts ditemukan."
+          elif [ -f "android/settings.gradle" ]; then
+            echo "settings.gradle ditemukan."
+          else
+            echo "Android settings tidak ditemukan."
+            exit 1
+          fi
+
+          if [ -f "android/app/build.gradle.kts" ]; then
+            echo "build.gradle.kts ditemukan."
+          elif [ -f "android/app/build.gradle" ]; then
+            echo "build.gradle ditemukan."
+          else
+            echo "Android app Gradle file tidak ditemukan."
+            exit 1
+          fi
+
+      - name: Prepare Gradle Wrapper
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          mkdir -p android/gradle/wrapper
+
+          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
+          networkTimeout=120000
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
 
           if [ -f android/gradlew ]; then
             chmod +x android/gradlew
           fi
 
-      - name: Configure Android
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Verify Gradle
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
         run: |
           set -e
 
-          touch android/gradle.properties
+          cd "$PROJECT_DIR/android"
 
-          if ! grep -q "^android.newDsl=" android/gradle.properties; then
-            echo "android.newDsl=false" >> android/gradle.properties
+          if [ ! -f gradlew ]; then
+            echo "gradlew tidak ditemukan."
+            exit 1
           fi
 
-      - name: Flutter Clean
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          set -e
+          chmod +x gradlew
 
-          flutter clean
-          flutter pub get
+          ./gradlew --version
+
+      - name: Flutter Analyze
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+        run: |
+          set +e
+
+          cd "$PROJECT_DIR"
+
+          flutter analyze > analyze.log 2>&1
+
+          STATUS=$?
+
+          echo "[RESULT_ANALYZE]"
+          cat analyze.log
+          echo "[END_RESULT_ANALYZE]"
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Flutter analyze menemukan masalah."
+          fi
+
+          exit 0
 
       - name: Build APK
-        working-directory: ${{ env.PROJECT_DIR }}
         env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+          ENTRY_POINT: ${{ steps.entry.outputs.entry_point }}
           BUILD_TYPE: ${{ inputs.build_type }}
+          BUILD_TAG: ${{ inputs.tag }}
         run: |
           set -e
 
-          echo "Build type: $BUILD_TYPE"
-          echo "Build tag: ${{ inputs.tag }}"
+          cd "$PROJECT_DIR"
+
+          echo "================================"
+          echo "Flutter APK Build"
+          echo "================================"
+          echo "Tag: $BUILD_TAG"
+          echo "Build Type: $BUILD_TYPE"
+          echo "Project: $PROJECT_DIR"
+          echo "Entry Point: $ENTRY_POINT"
+          echo "================================"
+
+          flutter clean
+
+          flutter pub get
 
           if [ "$BUILD_TYPE" = "debug" ]; then
             flutter build apk \
               --debug \
+              --target="$ENTRY_POINT" \
               --android-skip-build-dependency-validation
+
+          elif [ "$BUILD_TYPE" = "profile" ]; then
+            flutter build apk \
+              --profile \
+              --target="$ENTRY_POINT" \
+              --android-skip-build-dependency-validation
+
           else
             flutter build apk \
               --release \
+              --target="$ENTRY_POINT" \
               --android-skip-build-dependency-validation
           fi
 
       - name: Verify APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
         run: |
           set -e
 
-          echo "Searching APK..."
+          cd "$PROJECT_DIR"
 
-          find build/app/outputs -type f -name "*.apk" -print
+          APK=$(find build/app/outputs \
+            -type f \
+            -name "*.apk" \
+            -print \
+            -quit)
 
-          APK_COUNT=$(find build/app/outputs -type f -name "*.apk" | wc -l)
-
-          if [ "$APK_COUNT" -eq 0 ]; then
+          if [ -z "$APK" ]; then
             echo "APK tidak ditemukan."
+
+            find build/app/outputs \
+              -type f \
+              -print \
+              2>/dev/null || true
+
             exit 1
           fi
 
-          echo "APK berhasil dibuat."
+          echo "APK ditemukan:"
+          ls -lh "$APK"
 
-      - name: Rename APK
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Prepare Release APK
         env:
-          BUILD_TAG: ${{ inputs.tag }}
-          BUILD_TYPE: ${{ inputs.build_type }}
+          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
         run: |
           set -e
 
+          cd "$PROJECT_DIR"
+
+          rm -rf build/final
           mkdir -p build/final
 
-          APK=$(find build/app/outputs -type f -name "*.apk" | head -n 1)
+          APK=$(find build/app/outputs \
+            -type f \
+            -name "*.apk" \
+            -print \
+            -quit)
 
           if [ -z "$APK" ]; then
             echo "APK tidak ditemukan."
             exit 1
           fi
 
-          cp "$APK" "build/final/Flutter-${BUILD_TAG}-${BUILD_TYPE}.apk"
+          cp "$APK" build/final/release.apk
 
-          ls -lh build/final
+          test -f build/final/release.apk
+
+          echo "Release APK:"
+          ls -lh build/final/release.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Flutter-${{ inputs.tag }}-${{ inputs.build_type }}
-          path: ${{ env.PROJECT_DIR }}/build/final/*.apk
+          name: flutter-apk-${{ inputs.tag }}
+          path: ${{ steps.detect.outputs.project_dir }}/build/final/release.apk
           if-no-files-found: error
           retention-days: 7
 
-      - name: Build Summary
-        if: always()
+      - name: Create Or Get GitHub Release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          BUILD_TAG: ${{ inputs.tag }}
         run: |
-          echo "================================"
-          echo "Flutter APK Build"
-          echo "================================"
-          echo "Tag: ${{ inputs.tag }}"
-          echo "Build Type: ${{ inputs.build_type }}"
-          echo "Project: ${{ env.PROJECT_DIR }}"
-          echo "================================"
+          set -e
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "GH_PAT belum tersedia."
+            exit 1
+          fi
+
+          REPO="$GITHUB_REPOSITORY"
+
+          RESPONSE=$(curl \
+            --silent \
+            --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: FlutterBuildBot/1.0" \
+            "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
+
+          if echo "$RESPONSE" | python3 -c "import sys,json; json.load(sys.stdin)" >/dev/null 2>&1; then
+            RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url','').split('{')[0])")
+          else
+            RESPONSE=$(curl \
+              --silent \
+              --show-error \
+              --fail \
+              -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "User-Agent: FlutterBuildBot/1.0" \
+              "https://api.github.com/repos/$REPO/releases" \
+              -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":false,\"prerelease\":true}")
+
+            RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+          fi
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo "Release ID tidak ditemukan."
+            exit 1
+          fi
+
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "Upload URL tidak ditemukan."
+            exit 1
+          fi
