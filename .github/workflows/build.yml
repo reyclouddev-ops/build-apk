@@ -38,6 +38,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -45,6 +46,24 @@ jobs:
           flutter-version: "3.47.0"
           channel: stable
           cache: true
+
+      - name: Show Environment
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "Flutter:"
+          flutter --version
+          echo "======================================"
+          echo "Dart:"
+          dart --version
+          echo "======================================"
+          echo "Java:"
+          java -version
+          echo "======================================"
+          echo "GitHub Runner:"
+          uname -a
+          echo "======================================"
 
       - name: Download Project
         env:
@@ -95,27 +114,36 @@ jobs:
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "User-Agent: FlutterBuildBot/1.0" \
+              -H "User-Agent: FlutterBuildBot/2.0" \
               "https://api.github.com/repos/$REPO/releases/tags/$TAG_NAME")
 
-            ASSET_ID=$(echo "$RELEASE_JSON" | python3 -c "
-          import sys,json
-          data=json.load(sys.stdin)
-          name=sys.argv[1]
-          assets=data.get('assets',[])
-          found=next((x for x in assets if x.get('name')==name),None)
-          print(found.get('id','') if found else '')
-          " "$ASSET_NAME")
+            ASSET_ID=$(echo "$RELEASE_JSON" | python3 -c '
+import sys
+import json
+
+data = json.load(sys.stdin)
+name = sys.argv[1]
+
+assets = data.get("assets", [])
+found = next((x for x in assets if x.get("name") == name), None)
+
+print(found.get("id", "") if found else "")
+' "$ASSET_NAME")
 
             if [ -z "$ASSET_ID" ]; then
               echo "Asset $ASSET_NAME tidak ditemukan."
-              echo "$RELEASE_JSON" | python3 -c "
-          import sys,json
-          data=json.load(sys.stdin)
-          print('Assets yang tersedia:')
-          for x in data.get('assets',[]):
-              print('-',x.get('name'),x.get('id'))
-          "
+
+              echo "Assets yang tersedia:"
+              echo "$RELEASE_JSON" | python3 -c '
+import sys
+import json
+
+data = json.load(sys.stdin)
+
+for x in data.get("assets", []):
+    print("-", x.get("name"), x.get("id"))
+'
+
               exit 1
             fi
 
@@ -136,7 +164,7 @@ jobs:
             --max-time 600 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
-            -H "User-Agent: FlutterBuildBot/1.0" \
+            -H "User-Agent: FlutterBuildBot/2.0" \
             "$DOWNLOAD_URL" \
             --output project/project.zip
 
@@ -148,8 +176,10 @@ jobs:
           echo "Tipe file:"
           file project/project.zip
 
+          echo "Memeriksa ZIP:"
           unzip -t project/project.zip
 
+          echo "Mengekstrak project:"
           unzip -q project/project.zip -d project/source
 
           echo "Project ZIP berhasil diekstrak."
@@ -194,8 +224,10 @@ jobs:
 
           cd "$PROJECT_DIR"
 
+          echo "Flutter version:"
           flutter --version
 
+          echo "Pub get:"
           flutter pub get
 
       - name: Detect Entry Point
@@ -247,10 +279,16 @@ jobs:
           cd "$PROJECT_DIR"
 
           if [ ! -d "android" ]; then
+            echo "Folder android tidak ditemukan."
+            echo "Membuat Android platform dengan Flutter 3.47.0..."
+
             flutter create \
               --platforms=android \
               --project-name flutter_build_app \
               .
+          else
+            echo "Folder android sudah tersedia."
+            echo "Konfigurasi Android project tidak akan ditimpa."
           fi
 
           test -d android
@@ -273,7 +311,7 @@ jobs:
             exit 1
           fi
 
-      - name: Prepare Gradle Wrapper
+      - name: Check Android Configuration
         env:
           PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
         run: |
@@ -281,19 +319,35 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          mkdir -p android/gradle/wrapper
+          echo "======================================"
+          echo "ANDROID CONFIGURATION"
+          echo "======================================"
 
-          cat > android/gradle/wrapper/gradle-wrapper.properties <<'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.14-bin.zip
-          networkTimeout=120000
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
+          if [ -f android/settings.gradle.kts ]; then
+            echo "--- settings.gradle.kts ---"
+            cat android/settings.gradle.kts
+          elif [ -f android/settings.gradle ]; then
+            echo "--- settings.gradle ---"
+            cat android/settings.gradle
+          fi
 
-          if [ -f android/gradlew ]; then
-            chmod +x android/gradlew
+          echo "======================================"
+
+          if [ -f android/app/build.gradle.kts ]; then
+            echo "--- app/build.gradle.kts ---"
+            cat android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            echo "--- app/build.gradle ---"
+            cat android/app/build.gradle
+          fi
+
+          echo "======================================"
+
+          if [ -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            echo "--- gradle-wrapper.properties ---"
+            cat android/gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "gradle-wrapper.properties tidak ditemukan."
           fi
 
       - name: Verify Gradle
@@ -306,72 +360,168 @@ jobs:
 
           if [ ! -f gradlew ]; then
             echo "gradlew tidak ditemukan."
-            exit 1
+
+            echo "Mencoba membuat wrapper dari project..."
+            cd ..
+
+            flutter pub get
+
+            if [ ! -f android/gradlew ]; then
+              echo "Gradle wrapper tetap tidak ditemukan."
+              exit 1
+            fi
+
+            cd android
           fi
 
           chmod +x gradlew
 
+          echo "Gradle version:"
           ./gradlew --version
 
       - name: Flutter Analyze
+        id: analyze
+        continue-on-error: true
         env:
           PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
         run: |
-          set +e
-
           cd "$PROJECT_DIR"
+
+          echo "Menjalankan Flutter Analyze..."
+
+          set +e
 
           flutter analyze > analyze.log 2>&1
 
           STATUS=$?
 
-          echo "[RESULT_ANALYZE]"
           cat analyze.log
-          echo "[END_RESULT_ANALYZE]"
+
+          echo "Analyze exit code: $STATUS"
 
           if [ "$STATUS" -ne 0 ]; then
             echo "Flutter analyze menemukan masalah."
+            echo "Build tetap dilanjutkan agar error compile asli dapat diketahui."
+          else
+            echo "Flutter analyze bersih."
           fi
 
           exit 0
 
       - name: Build APK
+        id: build
+        continue-on-error: true
         env:
           PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
           ENTRY_POINT: ${{ steps.entry.outputs.entry_point }}
           BUILD_TYPE: ${{ inputs.build_type }}
           BUILD_TAG: ${{ inputs.tag }}
         run: |
-          set -e
-
           cd "$PROJECT_DIR"
 
-          echo "Tag: $BUILD_TAG"
-          echo "Build Type: $BUILD_TYPE"
-          echo "Project: $PROJECT_DIR"
+          echo "======================================"
+          echo "FLUTTER APK BUILD"
+          echo "======================================"
+          echo "Tag        : $BUILD_TAG"
+          echo "Build Type : $BUILD_TYPE"
+          echo "Project    : $PROJECT_DIR"
           echo "Entry Point: $ENTRY_POINT"
+          echo "======================================"
+
+          rm -f build_error.log
+          rm -f build_output.log
 
           flutter clean
+
           flutter pub get
+
+          echo "======================================"
+          echo "FLUTTER VERSION"
+          echo "======================================"
+
+          flutter --version
+
+          echo "======================================"
+          echo "BUILD START"
+          echo "======================================"
+
+          set +e
 
           if [ "$BUILD_TYPE" = "debug" ]; then
             flutter build apk \
               --debug \
               --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
+              --android-skip-build-dependency-validation \
+              -v \
+              2>&1 | tee build_output.log
+
+            STATUS=${PIPESTATUS[0]}
 
           elif [ "$BUILD_TYPE" = "profile" ]; then
             flutter build apk \
               --profile \
               --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
+              --android-skip-build-dependency-validation \
+              -v \
+              2>&1 | tee build_output.log
+
+            STATUS=${PIPESTATUS[0]}
 
           else
             flutter build apk \
               --release \
               --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation
+              --android-skip-build-dependency-validation \
+              -v \
+              2>&1 | tee build_output.log
+
+            STATUS=${PIPESTATUS[0]}
           fi
+
+          echo "Build exit code: $STATUS"
+
+          cp build_output.log build_error.log
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "======================================"
+            echo "BUILD FAILED"
+            echo "======================================"
+
+            echo "Error summary:"
+            grep -Ei \
+              "error:|error |exception|failed|failure:|undefined|not found|couldn't|cannot|invalid|unsupported" \
+              build_output.log \
+              | tail -150 || true
+
+            exit "$STATUS"
+          fi
+
+          echo "======================================"
+          echo "BUILD SUCCESS"
+          echo "======================================"
+
+          exit 0
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-logs-${{ inputs.tag }}
+          path: |
+            ${{ steps.detect.outputs.project_dir }}/build_output.log
+            ${{ steps.detect.outputs.project_dir }}/build_error.log
+            ${{ steps.detect.outputs.project_dir }}/analyze.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop If Build Failed
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "======================================"
+          echo "BUILD FAILED"
+          echo "======================================"
+          echo "Log lengkap sudah diupload sebagai artifact."
+          exit 1
 
       - name: Verify APK
         env:
@@ -401,6 +551,8 @@ jobs:
           echo "APK ditemukan:"
           ls -lh "$APK"
 
+          echo "apk_path=$APK" >> "$GITHUB_ENV"
+
       - name: Prepare Release APK
         env:
           PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
@@ -427,6 +579,7 @@ jobs:
 
           test -f build/final/release.apk
 
+          echo "Final APK:"
           ls -lh build/final/release.apk
 
       - name: Upload APK Artifact
@@ -456,30 +609,54 @@ jobs:
             --silent \
             --output release.json \
             --write-out "%{http_code}" \
+            --retry 5 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 120 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "User-Agent: FlutterBuildBot/1.0" \
+            -H "User-Agent: FlutterBuildBot/2.0" \
             "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
 
           if [ "$HTTP_CODE" = "200" ]; then
-            RELEASE_ID=$(python3 -c "import json; print(json.load(open('release.json')).get('id',''))")
-            UPLOAD_URL=$(python3 -c "import json; print(json.load(open('release.json')).get('upload_url','').split('{')[0])")
+            RELEASE_ID=$(python3 -c '
+import json
+print(json.load(open("release.json")).get("id", ""))
+')
+
+            UPLOAD_URL=$(python3 -c '
+import json
+print(json.load(open("release.json")).get("upload_url", "").split("{")[0])
+')
           else
             RESPONSE=$(curl \
               --silent \
               --show-error \
               --fail-with-body \
+              --retry 5 \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 120 \
               -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "User-Agent: FlutterBuildBot/1.0" \
+              -H "User-Agent: FlutterBuildBot/2.0" \
               "https://api.github.com/repos/$REPO/releases" \
               -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":false,\"prerelease\":true}")
 
-            RELEASE_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+            RELEASE_ID=$(echo "$RESPONSE" | python3 -c '
+import sys
+import json
+print(json.load(sys.stdin)["id"])
+')
+
+            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c '
+import sys
+import json
+print(json.load(sys.stdin)["upload_url"].split("{")[0])
+')
           fi
 
           if [ -z "$RELEASE_ID" ]; then
@@ -521,7 +698,7 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            -H "User-Agent: FlutterBuildBot/1.0" \
+            -H "User-Agent: FlutterBuildBot/2.0" \
             --data-binary "@$APK" \
             "$UPLOAD_URL?name=$FILE_NAME"
 
@@ -536,11 +713,15 @@ jobs:
             --silent \
             --show-error \
             --fail-with-body \
+            --retry 5 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 120 \
             -X PATCH \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "User-Agent: FlutterBuildBot/1.0" \
+            -H "User-Agent: FlutterBuildBot/2.0" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -d '{"draft":false}'
 
