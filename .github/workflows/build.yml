@@ -134,6 +134,7 @@ print(found.get("id", "") if found else "")
               echo "Asset $ASSET_NAME tidak ditemukan."
 
               echo "Assets yang tersedia:"
+
               echo "$RELEASE_JSON" | python3 -c '
 import sys
 import json
@@ -488,6 +489,7 @@ for x in data.get("assets", []):
             echo "======================================"
 
             echo "Error summary:"
+
             grep -Ei \
               "error:|error |exception|failed|failure:|undefined|not found|couldn't|cannot|invalid|unsupported" \
               build_output.log \
