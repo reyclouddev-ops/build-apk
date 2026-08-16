@@ -27,469 +27,162 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
+        uses: actions/checkout@v6
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.47.0"
           channel: stable
+          flutter-version: "3.47.0"
           cache: true
-
-      - name: Environment
-        run: |
-          set -e
-          echo "Flutter:"
-          flutter --version
-          echo "Dart:"
-          dart --version
-          echo "Java:"
-          java -version
-          echo "Git:"
-          git --version
 
       - name: Download Project
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
           ZIP_URL: ${{ inputs.zip_url }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
 
-          rm -rf project
-          mkdir -p project/source
-
-          if [ -z "$GH_TOKEN" ]; then
-            echo "GH_PAT belum tersedia."
-            exit 1
-          fi
-
-          if [ -z "$ZIP_URL" ]; then
-            echo "ZIP_URL belum tersedia."
-            exit 1
-          fi
-
-          DOWNLOAD_URL="$ZIP_URL"
-
-          if echo "$ZIP_URL" | grep -qE '^https://github\.com/[^/]+/[^/]+/releases/download/'; then
-            RELEASE_PATH=$(printf '%s' "$ZIP_URL" | sed -E 's#^https://github\.com/([^/]+/[^/]+)/releases/download/(.*)$#\1|\2#')
-
-            REPO=$(printf '%s' "$RELEASE_PATH" | cut -d'|' -f1)
-            RELEASE_PART=$(printf '%s' "$RELEASE_PATH" | cut -d'|' -f2)
-
-            TAG_NAME=$(printf '%s' "$RELEASE_PART" | cut -d'/' -f1)
-            ASSET_NAME=$(printf '%s' "$RELEASE_PART" | cut -d'/' -f2-)
-
-            RELEASE_JSON=$(curl \
-              --silent \
-              --show-error \
-              --fail-with-body \
-              --retry 5 \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 120 \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              -H "User-Agent: FlutterBuildBot/2.0" \
-              "https://api.github.com/repos/$REPO/releases/tags/$TAG_NAME")
-
-            ASSET_ID=$(printf '%s' "$RELEASE_JSON" | python3 -c '
-import json
-import sys
-
-data = json.load(sys.stdin)
-name = sys.argv[1]
-
-for asset in data.get("assets", []):
-    if asset.get("name") == name:
-        print(asset.get("id", ""))
-        break
-' "$ASSET_NAME")
-
-            if [ -z "$ASSET_ID" ]; then
-              echo "Asset tidak ditemukan: $ASSET_NAME"
-              exit 1
-            fi
-
-            DOWNLOAD_URL="https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID"
-          fi
-
-          curl \
-            --location \
-            --fail-with-body \
+          mkdir -p project
+          curl -L \
+            --fail \
             --retry 5 \
             --retry-delay 3 \
             --connect-timeout 30 \
             --max-time 600 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
-            -H "User-Agent: FlutterBuildBot/2.0" \
-            "$DOWNLOAD_URL" \
+            -H "User-Agent: FlutterBuildBot" \
+            "$ZIP_URL" \
             -o project/project.zip
 
-          if [ ! -s project/project.zip ]; then
-            echo "Project ZIP kosong atau gagal didownload."
-            exit 1
-          fi
+          test -s project/project.zip
+          unzip -q project/project.zip -d project
 
-          file project/project.zip
-          unzip -t project/project.zip
-          unzip -q project/project.zip -d project/source
-
-      - name: Detect Flutter Project
-        id: detect
+      - name: Find Flutter Project
+        id: project
         run: |
           set -e
 
-          PUBSPEC=$(find project/source -type f -name "pubspec.yaml" -print -quit)
+          PUBSPEC=$(find project \
+            -type f \
+            -name pubspec.yaml \
+            -print \
+            -quit)
 
           if [ -z "$PUBSPEC" ]; then
-            echo "pubspec.yaml tidak ditemukan."
-            find project/source -maxdepth 6 -type f -print | sort | head -300
+            echo "pubspec.yaml tidak ditemukan"
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PUBSPEC")
+          DIR=$(dirname "$PUBSPEC")
 
-          echo "Flutter project:"
-          echo "$PROJECT_DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Flutter project: $DIR"
 
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Flutter
+      - name: Install Dependencies
         env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
           flutter pub get
-
-      - name: Detect Entry Point
-        id: entry
-        env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
-        run: |
-          set -e
-          cd "$PROJECT_DIR"
-
-          if [ -f "lib/main.dart" ]; then
-            echo "entry_point=lib/main.dart" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          ENTRY=$(grep -RIl --include="*.dart" "void main(" lib 2>/dev/null | head -1 || true)
-
-          if [ -z "$ENTRY" ]; then
-            echo "Entry point Flutter tidak ditemukan."
-            exit 1
-          fi
-
-          echo "entry_point=$ENTRY" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Android
         env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
 
-          if [ ! -d "android" ]; then
-            flutter create \
-              --platforms=android \
-              --project-name flutter_build_app \
-              .
+          if [ ! -d android ]; then
+            flutter create --platforms=android .
           fi
-
-          if [ ! -f "android/gradlew" ]; then
-            echo "android/gradlew tidak ditemukan."
-            exit 1
-          fi
-
-          if [ -f "android/settings.gradle" ]; then
-            if [ ! -f "android/app/build.gradle" ]; then
-              echo "android/app/build.gradle tidak ditemukan."
-              exit 1
-            fi
-          elif [ -f "android/settings.gradle.kts" ]; then
-            if [ ! -f "android/app/build.gradle.kts" ]; then
-              echo "android/app/build.gradle.kts tidak ditemukan."
-              exit 1
-            fi
-          else
-            echo "Android Gradle configuration tidak ditemukan."
-            exit 1
-          fi
-
-          chmod +x android/gradlew
-
-      - name: Verify Gradle
-        env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
-        run: |
-          set -e
-          cd "$PROJECT_DIR/android"
-          ./gradlew --version
-
-      - name: Analyze
-        id: analyze
-        continue-on-error: true
-        env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
-        run: |
-          cd "$PROJECT_DIR"
-
-          set +e
-          flutter analyze > analyze.log 2>&1
-          STATUS=$?
-          set -e
-
-          cat analyze.log
-
-          echo "Analyze exit code: $STATUS"
-
-          exit 0
 
       - name: Build APK
-        id: build
         env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
-          ENTRY_POINT: ${{ steps.entry.outputs.entry_point }}
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -e
-
           cd "$PROJECT_DIR"
 
-          rm -f build_output.log
-          rm -f build_error.log
-
-          flutter clean
-          flutter pub get
-
-          set +e
-
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk \
-              --debug \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation \
-              > build_output.log 2>&1
-            STATUS=$?
+            flutter build apk --debug
           elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk \
-              --profile \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation \
-              > build_output.log 2>&1
-            STATUS=$?
+            flutter build apk --profile
           else
-            flutter build apk \
-              --release \
-              --target="$ENTRY_POINT" \
-              --android-skip-build-dependency-validation \
-              > build_output.log 2>&1
-            STATUS=$?
+            flutter build apk --release
           fi
 
-          cat build_output.log
-          cp build_output.log build_error.log
-
-          echo "Build exit code: $STATUS"
-
-          if [ "$STATUS" -ne 0 ]; then
-            echo "BUILD FAILED"
-            exit "$STATUS"
-          fi
-
-          echo "BUILD SUCCESS"
-
-      - name: Upload Build Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ inputs.tag }}
-          path: |
-            project/source/**/build_output.log
-            project/source/**/build_error.log
-            project/source/**/analyze.log
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Verify APK
+      - name: Find APK
+        id: apk
         env:
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
-
-          APK=$(find build/app/outputs -type f -name "*.apk" -print -quit)
+          APK=$(find "$PROJECT_DIR/build/app/outputs" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            -quit)
 
           if [ -z "$APK" ]; then
-            echo "APK tidak ditemukan."
-            find build/app/outputs -type f -print 2>/dev/null || true
+            echo "APK tidak ditemukan"
             exit 1
           fi
 
-          mkdir -p build/final
-
-          cp "$APK" build/final/release.apk
-
-          test -s build/final/release.apk
-
-          ls -lh build/final/release.apk
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          ls -lh "$APK"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-apk-${{ inputs.tag }}
-          path: ${{ steps.detect.outputs.project_dir }}/build/final/release.apk
+          path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 7
 
-      - name: Create GitHub Release
+      - name: Create Release
         id: release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          BUILD_TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -e
 
-          if [ -z "$GH_TOKEN" ]; then
-            echo "GH_PAT belum tersedia."
-            exit 1
-          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build $TAG" \
+            --prerelease \
+            --draft \
+            --generate-notes=false
 
-          REPO="$GITHUB_REPOSITORY"
-
-          HTTP_CODE=$(curl \
-            --silent \
-            --output release.json \
-            --write-out "%{http_code}" \
-            --retry 5 \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 120 \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "User-Agent: FlutterBuildBot/2.0" \
-            "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
-
-          if [ "$HTTP_CODE" = "200" ]; then
-            RELEASE_ID=$(python3 -c 'import json; print(json.load(open("release.json")).get("id",""))')
-
-            if [ -n "$RELEASE_ID" ]; then
-              curl \
-                --silent \
-                --show-error \
-                --fail-with-body \
-                --retry 5 \
-                --retry-delay 3 \
-                -X DELETE \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28" \
-                -H "User-Agent: FlutterBuildBot/2.0" \
-                "https://api.github.com/repos/$REPO/releases/$RELEASE_ID"
-            fi
-          fi
-
-          RESPONSE=$(curl \
-            --silent \
-            --show-error \
-            --fail-with-body \
-            --retry 5 \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 120 \
-            -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "User-Agent: FlutterBuildBot/2.0" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/$REPO/releases" \
-            -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":true,\"prerelease\":true}")
-
-          RELEASE_ID=$(printf '%s' "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
-
-          UPLOAD_URL=$(printf '%s' "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("upload_url","").split("{")[0])')
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo "Release ID tidak ditemukan."
-            echo "$RESPONSE"
-            exit 1
-          fi
-
-          if [ -z "$UPLOAD_URL" ]; then
-            echo "Upload URL tidak ditemukan."
-            echo "$RESPONSE"
-            exit 1
-          fi
-
-          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
-          echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
+          echo "Release dibuat: $TAG"
 
       - name: Upload APK Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
-          PROJECT_DIR: ${{ steps.detect.outputs.project_dir }}
-          BUILD_TAG: ${{ inputs.tag }}
+          TAG: ${{ inputs.tag }}
+          APK: ${{ steps.apk.outputs.path }}
         run: |
           set -e
 
-          APK="$PROJECT_DIR/build/final/release.apk"
-          FILE_NAME="app-$BUILD_TAG.apk"
-
-          test -s "$APK"
-
-          curl \
-            --silent \
-            --show-error \
-            --fail-with-body \
-            --retry 5 \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 600 \
-            -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/vnd.android.package-archive" \
-            -H "User-Agent: FlutterBuildBot/2.0" \
-            --data-binary "@$APK" \
-            "$UPLOAD_URL?name=$FILE_NAME"
+          gh release upload "$TAG" \
+            "$APK" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
       - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -e
 
-          curl \
-            --silent \
-            --show-error \
-            --fail-with-body \
-            --retry 5 \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 120 \
-            -X PATCH \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            -H "User-Agent: FlutterBuildBot/2.0" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -d '{"draft":false}'
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
 
           echo "BUILD SUCCESS"
