@@ -7,10 +7,12 @@ on:
         description: Flutter project ZIP URL
         required: true
         type: string
+
       tag:
         description: Build tag
         required: true
         type: string
+
       build_type:
         description: Build type
         required: false
@@ -52,17 +54,25 @@ jobs:
           set -e
 
           echo "======================================"
-          echo "Flutter:"
+          echo "Flutter"
+          echo "======================================"
           flutter --version
+
           echo "======================================"
-          echo "Dart:"
+          echo "Dart"
+          echo "======================================"
           dart --version
+
           echo "======================================"
-          echo "Java:"
+          echo "Java"
+          echo "======================================"
           java -version
+
           echo "======================================"
-          echo "GitHub Runner:"
+          echo "GitHub Runner"
+          echo "======================================"
           uname -a
+
           echo "======================================"
 
       - name: Download Project
@@ -91,6 +101,7 @@ jobs:
           DOWNLOAD_URL="$ZIP_URL"
 
           if echo "$ZIP_URL" | grep -q "github.com/.*/releases/download/"; then
+
             RELEASE_PATH=$(echo "$ZIP_URL" | sed -E 's#https://github.com/([^/]+/[^/]+)/releases/download/(.*)#\1|\2#')
 
             REPO=$(echo "$RELEASE_PATH" | cut -d'|' -f1)
@@ -117,39 +128,17 @@ jobs:
               -H "User-Agent: FlutterBuildBot/2.0" \
               "https://api.github.com/repos/$REPO/releases/tags/$TAG_NAME")
 
-            ASSET_ID=$(
-              echo "$RELEASE_JSON" | python3 - "$ASSET_NAME" <<'PY'
-import sys
-import json
+            ASSET_ID=$(echo "$RELEASE_JSON" | jq -r \
+              --arg NAME "$ASSET_NAME" \
+              '.assets[]? | select(.name == $NAME) | .id' \
+              | head -1)
 
-data = json.load(sys.stdin)
-name = sys.argv[1]
-
-assets = data.get("assets", [])
-
-found = next(
-    (x for x in assets if x.get("name") == name),
-    None
-)
-
-print(found.get("id", "") if found else "")
-PY
-            )
-
-            if [ -z "$ASSET_ID" ]; then
+            if [ -z "$ASSET_ID" ] || [ "$ASSET_ID" = "null" ]; then
               echo "Asset $ASSET_NAME tidak ditemukan."
 
               echo "Assets yang tersedia:"
-
-              echo "$RELEASE_JSON" | python3 <<'PY'
-import sys
-import json
-
-data = json.load(sys.stdin)
-
-for x in data.get("assets", []):
-    print("-", x.get("name"), x.get("id"))
-PY
+              echo "$RELEASE_JSON" | jq -r \
+                '.assets[]? | "- \(.name) | ID: \(.id)"'
 
               exit 1
             fi
@@ -287,16 +276,15 @@ PY
 
           if [ ! -d "android" ]; then
             echo "Folder android tidak ditemukan."
-            echo "Membuat Android platform dengan Flutter $FLUTTER_VERSION..."
+            echo "Membuat Android platform..."
 
             flutter create \
               --platforms=android \
               --project-name flutter_build_app \
               .
-
           else
             echo "Folder android sudah tersedia."
-            echo "Konfigurasi Android project tidak akan ditimpa."
+            echo "Konfigurasi Android tidak ditimpa."
           fi
 
           test -d android
@@ -408,7 +396,7 @@ PY
 
           if [ "$STATUS" -ne 0 ]; then
             echo "Flutter analyze menemukan masalah."
-            echo "Build tetap dilanjutkan agar error compile asli dapat diketahui."
+            echo "Build tetap dilanjutkan."
           else
             echo "Flutter analyze bersih."
           fi
@@ -439,7 +427,6 @@ PY
           rm -f build_output.log
 
           flutter clean
-
           flutter pub get
 
           echo "======================================"
@@ -494,6 +481,7 @@ PY
           cp build_output.log build_error.log
 
           if [ "$STATUS" -ne 0 ]; then
+
             echo "======================================"
             echo "BUILD FAILED"
             echo "======================================"
@@ -532,7 +520,9 @@ PY
           echo "======================================"
           echo "BUILD FAILED"
           echo "======================================"
+
           echo "Log lengkap sudah diupload sebagai artifact."
+
           exit 1
 
       - name: Verify APK
@@ -617,6 +607,9 @@ PY
 
           REPO="$GITHUB_REPOSITORY"
 
+          echo "Repository: $REPO"
+          echo "Release tag: $BUILD_TAG"
+
           HTTP_CODE=$(curl \
             --silent \
             --output release.json \
@@ -633,25 +626,10 @@ PY
 
           if [ "$HTTP_CODE" = "200" ]; then
 
-            RELEASE_ID=$(python3 <<'PY'
-import json
+            echo "Release sudah ada."
 
-with open("release.json", "r") as f:
-    data = json.load(f)
-
-print(data.get("id", ""))
-PY
-            )
-
-            UPLOAD_URL=$(python3 <<'PY'
-import json
-
-with open("release.json", "r") as f:
-    data = json.load(f)
-
-print(data.get("upload_url", "").split("{")[0])
-PY
-            )
+            RELEASE_ID=$(jq -r '.id // empty' release.json)
+            UPLOAD_URL=$(jq -r '.upload_url // empty' release.json)
 
           elif [ "$HTTP_CODE" = "404" ]; then
 
@@ -671,52 +649,44 @@ PY
               -H "X-GitHub-Api-Version: 2022-11-28" \
               -H "User-Agent: FlutterBuildBot/2.0" \
               "https://api.github.com/repos/$REPO/releases" \
-              -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":false,\"prerelease\":true}")
+              -d "$(jq -n \
+                --arg tag "$BUILD_TAG" \
+                '{
+                  tag_name: $tag,
+                  name: ("Build " + $tag),
+                  draft: false,
+                  prerelease: true,
+                  generate_release_notes: false
+                }'
+              )")
 
-            RELEASE_ID=$(echo "$RESPONSE" | python3 <<'PY'
-import sys
-import json
-
-data = json.load(sys.stdin)
-
-print(data.get("id", ""))
-PY
-            )
-
-            UPLOAD_URL=$(echo "$RESPONSE" | python3 <<'PY'
-import sys
-import json
-
-data = json.load(sys.stdin)
-
-print(data.get("upload_url", "").split("{")[0])
-PY
-            )
+            RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+            UPLOAD_URL=$(echo "$RESPONSE" | jq -r '.upload_url // empty')
 
           else
 
             echo "Gagal mengambil release."
             echo "HTTP: $HTTP_CODE"
             cat release.json
+
             exit 1
 
           fi
 
-          if [ -z "$RELEASE_ID" ]; then
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
             echo "Release ID tidak ditemukan."
             exit 1
           fi
 
-          if [ -z "$UPLOAD_URL" ]; then
+          if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then
             echo "Upload URL tidak ditemukan."
             exit 1
           fi
 
-          echo "Release ID:"
-          echo "$RELEASE_ID"
+          UPLOAD_URL=$(echo "$UPLOAD_URL" | sed 's/{.*//')
 
-          echo "Upload URL:"
-          echo "$UPLOAD_URL"
+          echo "Release ID: $RELEASE_ID"
+          echo "Upload URL: $UPLOAD_URL"
 
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
@@ -730,37 +700,29 @@ PY
 
           FILE_NAME="app-${{ inputs.tag }}.apk"
 
-          echo "Mencari asset lama: $FILE_NAME"
+          echo "Mengecek asset lama: $FILE_NAME"
 
-          ASSETS=$(curl \
+          ASSETS_JSON=$(curl \
             --silent \
             --show-error \
             --fail-with-body \
             --retry 5 \
             --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 120 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "User-Agent: FlutterBuildBot/2.0" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets")
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?per_page=100")
 
-          ASSET_ID=$(echo "$ASSETS" | python3 - "$FILE_NAME" <<'PY'
-import sys
-import json
+          ASSET_ID=$(echo "$ASSETS_JSON" | jq -r \
+            --arg NAME "$FILE_NAME" \
+            '.[] | select(.name == $NAME) | .id' \
+            | head -1)
 
-data = json.load(sys.stdin)
-name = sys.argv[1]
+          if [ -n "$ASSET_ID" ] && [ "$ASSET_ID" != "null" ]; then
 
-found = next(
-    (x for x in data if x.get("name") == name),
-    None
-)
-
-print(found.get("id", "") if found else "")
-PY
-          )
-
-          if [ -n "$ASSET_ID" ]; then
             echo "Asset lama ditemukan: $ASSET_ID"
             echo "Menghapus asset lama..."
 
@@ -770,6 +732,8 @@ PY
               --fail-with-body \
               --retry 5 \
               --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 120 \
               -X DELETE \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
@@ -778,8 +742,11 @@ PY
               "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
 
             echo "Asset lama berhasil dihapus."
+
           else
-            echo "Tidak ada asset lama."
+
+            echo "Asset lama tidak ditemukan."
+
           fi
 
       - name: Upload APK To GitHub Release
@@ -796,10 +763,10 @@ PY
 
           FILE_NAME="app-${{ inputs.tag }}.apk"
 
-          echo "Mengupload APK:"
+          echo "Upload APK:"
           echo "$FILE_NAME"
 
-          curl \
+          RESPONSE=$(curl \
             --silent \
             --show-error \
             --fail-with-body \
@@ -813,9 +780,27 @@ PY
             -H "Content-Type: application/vnd.android.package-archive" \
             -H "User-Agent: FlutterBuildBot/2.0" \
             --data-binary "@$APK" \
-            "$UPLOAD_URL?name=$FILE_NAME"
+            "$UPLOAD_URL?name=$FILE_NAME")
+
+          echo "$RESPONSE" | jq -r '
+            {
+              id: .id,
+              name: .name,
+              size: .size,
+              browser_download_url: .browser_download_url
+            }
+          '
+
+          ASSET_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+
+          if [ -z "$ASSET_ID" ]; then
+            echo "Upload APK gagal."
+            echo "$RESPONSE"
+            exit 1
+          fi
 
           echo "APK berhasil diupload."
+          echo "Asset ID: $ASSET_ID"
 
       - name: Publish GitHub Release
         env:
@@ -824,7 +809,9 @@ PY
         run: |
           set -e
 
-          curl \
+          echo "Publish release..."
+
+          RESPONSE=$(curl \
             --silent \
             --show-error \
             --fail-with-body \
@@ -838,8 +825,28 @@ PY
             -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "User-Agent: FlutterBuildBot/2.0" \
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -d '{"draft":false}'
+            -d '{"draft":false}')
 
+          PUBLISHED=$(echo "$RESPONSE" | jq -r '.draft // true')
+
+          if [ "$PUBLISHED" = "true" ]; then
+            echo "Release masih draft."
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          echo "Release berhasil dipublish."
+
+      - name: Build Summary
+        if: success()
+        env:
+          BUILD_TAG: ${{ inputs.tag }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
           echo "======================================"
-          echo "RELEASE BERHASIL DIPUBLISH"
+          echo "BUILD SELESAI"
+          echo "======================================"
+          echo "Tag        : $BUILD_TAG"
+          echo "Build Type : $BUILD_TYPE"
+          echo "Repository : $GITHUB_REPOSITORY"
           echo "======================================"
