@@ -117,7 +117,8 @@ jobs:
               -H "User-Agent: FlutterBuildBot/2.0" \
               "https://api.github.com/repos/$REPO/releases/tags/$TAG_NAME")
 
-            ASSET_ID=$(echo "$RELEASE_JSON" | python3 -c '
+            ASSET_ID=$(
+              echo "$RELEASE_JSON" | python3 - "$ASSET_NAME" <<'PY'
 import sys
 import json
 
@@ -125,17 +126,22 @@ data = json.load(sys.stdin)
 name = sys.argv[1]
 
 assets = data.get("assets", [])
-found = next((x for x in assets if x.get("name") == name), None)
+
+found = next(
+    (x for x in assets if x.get("name") == name),
+    None
+)
 
 print(found.get("id", "") if found else "")
-' "$ASSET_NAME")
+PY
+            )
 
             if [ -z "$ASSET_ID" ]; then
               echo "Asset $ASSET_NAME tidak ditemukan."
 
               echo "Assets yang tersedia:"
 
-              echo "$RELEASE_JSON" | python3 -c '
+              echo "$RELEASE_JSON" | python3 <<'PY'
 import sys
 import json
 
@@ -143,7 +149,7 @@ data = json.load(sys.stdin)
 
 for x in data.get("assets", []):
     print("-", x.get("name"), x.get("id"))
-'
+PY
 
               exit 1
             fi
@@ -281,12 +287,13 @@ for x in data.get("assets", []):
 
           if [ ! -d "android" ]; then
             echo "Folder android tidak ditemukan."
-            echo "Membuat Android platform dengan Flutter 3.47.0..."
+            echo "Membuat Android platform dengan Flutter $FLUTTER_VERSION..."
 
             flutter create \
               --platforms=android \
               --project-name flutter_build_app \
               .
+
           else
             echo "Folder android sudah tersedia."
             echo "Konfigurasi Android project tidak akan ditimpa."
@@ -362,7 +369,6 @@ for x in data.get("assets", []):
           if [ ! -f gradlew ]; then
             echo "gradlew tidak ditemukan."
 
-            echo "Mencoba membuat wrapper dari project..."
             cd ..
 
             flutter pub get
@@ -449,6 +455,7 @@ for x in data.get("assets", []):
           set +e
 
           if [ "$BUILD_TYPE" = "debug" ]; then
+
             flutter build apk \
               --debug \
               --target="$ENTRY_POINT" \
@@ -459,6 +466,7 @@ for x in data.get("assets", []):
             STATUS=${PIPESTATUS[0]}
 
           elif [ "$BUILD_TYPE" = "profile" ]; then
+
             flutter build apk \
               --profile \
               --target="$ENTRY_POINT" \
@@ -469,6 +477,7 @@ for x in data.get("assets", []):
             STATUS=${PIPESTATUS[0]}
 
           else
+
             flutter build apk \
               --release \
               --target="$ENTRY_POINT" \
@@ -477,6 +486,7 @@ for x in data.get("assets", []):
               2>&1 | tee build_output.log
 
             STATUS=${PIPESTATUS[0]}
+
           fi
 
           echo "Build exit code: $STATUS"
@@ -622,16 +632,31 @@ for x in data.get("assets", []):
             "https://api.github.com/repos/$REPO/releases/tags/$BUILD_TAG")
 
           if [ "$HTTP_CODE" = "200" ]; then
-            RELEASE_ID=$(python3 -c '
-import json
-print(json.load(open("release.json")).get("id", ""))
-')
 
-            UPLOAD_URL=$(python3 -c '
+            RELEASE_ID=$(python3 <<'PY'
 import json
-print(json.load(open("release.json")).get("upload_url", "").split("{")[0])
-')
-          else
+
+with open("release.json", "r") as f:
+    data = json.load(f)
+
+print(data.get("id", ""))
+PY
+            )
+
+            UPLOAD_URL=$(python3 <<'PY'
+import json
+
+with open("release.json", "r") as f:
+    data = json.load(f)
+
+print(data.get("upload_url", "").split("{")[0])
+PY
+            )
+
+          elif [ "$HTTP_CODE" = "404" ]; then
+
+            echo "Release belum ada. Membuat release baru..."
+
             RESPONSE=$(curl \
               --silent \
               --show-error \
@@ -648,17 +673,33 @@ print(json.load(open("release.json")).get("upload_url", "").split("{")[0])
               "https://api.github.com/repos/$REPO/releases" \
               -d "{\"tag_name\":\"$BUILD_TAG\",\"name\":\"Build $BUILD_TAG\",\"draft\":false,\"prerelease\":true}")
 
-            RELEASE_ID=$(echo "$RESPONSE" | python3 -c '
+            RELEASE_ID=$(echo "$RESPONSE" | python3 <<'PY'
 import sys
 import json
-print(json.load(sys.stdin)["id"])
-')
 
-            UPLOAD_URL=$(echo "$RESPONSE" | python3 -c '
+data = json.load(sys.stdin)
+
+print(data.get("id", ""))
+PY
+            )
+
+            UPLOAD_URL=$(echo "$RESPONSE" | python3 <<'PY'
 import sys
 import json
-print(json.load(sys.stdin)["upload_url"].split("{")[0])
-')
+
+data = json.load(sys.stdin)
+
+print(data.get("upload_url", "").split("{")[0])
+PY
+            )
+
+          else
+
+            echo "Gagal mengambil release."
+            echo "HTTP: $HTTP_CODE"
+            cat release.json
+            exit 1
+
           fi
 
           if [ -z "$RELEASE_ID" ]; then
@@ -671,8 +712,75 @@ print(json.load(sys.stdin)["upload_url"].split("{")[0])
             exit 1
           fi
 
+          echo "Release ID:"
+          echo "$RELEASE_ID"
+
+          echo "Upload URL:"
+          echo "$UPLOAD_URL"
+
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Remove Existing APK Asset
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          set -e
+
+          FILE_NAME="app-${{ inputs.tag }}.apk"
+
+          echo "Mencari asset lama: $FILE_NAME"
+
+          ASSETS=$(curl \
+            --silent \
+            --show-error \
+            --fail-with-body \
+            --retry 5 \
+            --retry-delay 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: FlutterBuildBot/2.0" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets")
+
+          ASSET_ID=$(echo "$ASSETS" | python3 - "$FILE_NAME" <<'PY'
+import sys
+import json
+
+data = json.load(sys.stdin)
+name = sys.argv[1]
+
+found = next(
+    (x for x in data if x.get("name") == name),
+    None
+)
+
+print(found.get("id", "") if found else "")
+PY
+          )
+
+          if [ -n "$ASSET_ID" ]; then
+            echo "Asset lama ditemukan: $ASSET_ID"
+            echo "Menghapus asset lama..."
+
+            curl \
+              --silent \
+              --show-error \
+              --fail-with-body \
+              --retry 5 \
+              --retry-delay 3 \
+              -X DELETE \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "User-Agent: FlutterBuildBot/2.0" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
+
+            echo "Asset lama berhasil dihapus."
+          else
+            echo "Tidak ada asset lama."
+          fi
 
       - name: Upload APK To GitHub Release
         env:
@@ -687,6 +795,9 @@ print(json.load(sys.stdin)["upload_url"].split("{")[0])
           test -f "$APK"
 
           FILE_NAME="app-${{ inputs.tag }}.apk"
+
+          echo "Mengupload APK:"
+          echo "$FILE_NAME"
 
           curl \
             --silent \
@@ -703,6 +814,8 @@ print(json.load(sys.stdin)["upload_url"].split("{")[0])
             -H "User-Agent: FlutterBuildBot/2.0" \
             --data-binary "@$APK" \
             "$UPLOAD_URL?name=$FILE_NAME"
+
+          echo "APK berhasil diupload."
 
       - name: Publish GitHub Release
         env:
@@ -727,4 +840,6 @@ print(json.load(sys.stdin)["upload_url"].split("{")[0])
             "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -d '{"draft":false}'
 
-          echo "Release berhasil dipublish."
+          echo "======================================"
+          echo "RELEASE BERHASIL DIPUBLISH"
+          echo "======================================"
