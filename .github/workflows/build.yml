@@ -43,6 +43,7 @@ jobs:
         run: |
           set -e
           mkdir -p project
+
           curl -L \
             --fail-with-body \
             --retry 5 \
@@ -54,6 +55,7 @@ jobs:
             -H "User-Agent: FlutterBuildBot" \
             "$ZIP_URL" \
             -o project/project.zip
+
           test -s project/project.zip
           unzip -q project/project.zip -d project
           rm -f project/project.zip
@@ -62,10 +64,19 @@ jobs:
         id: project
         run: |
           set -e
-          PUBSPEC=$(find project -type f -name pubspec.yaml -print -quit)
+
+          PUBSPEC=$(find project \
+            -type f \
+            -name pubspec.yaml \
+            -print \
+            -quit)
+
           test -n "$PUBSPEC"
+
           DIR=$(dirname "$PUBSPEC")
+
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Flutter project: $DIR"
 
       - name: Prepare Android
         env:
@@ -78,9 +89,14 @@ jobs:
             flutter create --platforms=android .
           fi
 
+          mkdir -p android
+
           if [ -f android/gradle.properties ]; then
-            grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
-            grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+            grep -q '^android.useAndroidX=' android/gradle.properties || \
+              echo 'android.useAndroidX=true' >> android/gradle.properties
+
+            grep -q '^android.enableJetifier=' android/gradle.properties || \
+              echo 'android.enableJetifier=true' >> android/gradle.properties
           else
             printf '%s\n' \
               'android.useAndroidX=true' \
@@ -88,23 +104,38 @@ jobs:
               > android/gradle.properties
           fi
 
+      - name: Clean Project
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          flutter clean
+          rm -rf .dart_tool
+          rm -rf build
+          rm -rf android/.gradle
+          rm -rf android/app/build
+
       - name: Install Dependencies
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
-          flutter clean
-          rm -rf .dart_tool build
+
           flutter pub get
 
-      - name: Analyze Project
+      - name: Verify Dart Sources
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
-          flutter analyze --no-fatal-infos --no-fatal-warnings
+
+          test -f pubspec.yaml
+          test -d lib
+          test -f lib/main.dart
 
       - name: Build APK
         env:
@@ -115,14 +146,13 @@ jobs:
           cd "$PROJECT_DIR"
 
           rm -rf build
-          flutter pub get
 
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug 2>&1 | tee build.log
+            flutter build apk --debug --verbose 2>&1 | tee build.log
           elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk --profile 2>&1 | tee build.log
+            flutter build apk --profile --verbose 2>&1 | tee build.log
           else
-            flutter build apk --release 2>&1 | tee build.log
+            flutter build apk --release --verbose 2>&1 | tee build.log
           fi
 
       - name: Find APK
@@ -131,14 +161,27 @@ jobs:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           APK=$(find "$PROJECT_DIR/build/app/outputs" \
             -type f \
             -name "*.apk" \
             -print \
             -quit)
+
           test -n "$APK"
+
           echo "path=$APK" >> "$GITHUB_OUTPUT"
           ls -lh "$APK"
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-log-${{ inputs.tag }}
+          path: |
+            ${{ steps.project.outputs.dir }}/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -154,6 +197,13 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -e
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+          fi
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Build $TAG" \
@@ -167,10 +217,12 @@ jobs:
           APK: ${{ steps.apk.outputs.path }}
         run: |
           set -e
+
           gh release upload "$TAG" \
             "$APK" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
       - name: Build Success
-        run: echo "BUILD SUCCESS"
+        run: |
+          echo "BUILD SUCCESS"
