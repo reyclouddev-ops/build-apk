@@ -14,7 +14,7 @@ on:
       build_type:
         description: Build type
         required: false
-        default: release
+        default: debug
         type: string
 
 permissions:
@@ -60,24 +60,49 @@ jobs:
           unzip -oq project/project.zip -d project
           rm -f project/project.zip
 
-      - name: Find Flutter Project
+      - name: Find Latest Flutter Project
         id: project
         run: |
           set -e
-          PUBSPEC=$(find project -type f -name pubspec.yaml -print -quit)
-          if [ -z "$PUBSPEC" ]; then
+
+          mapfile -t PUBSPECS < <(find "$GITHUB_WORKSPACE/project" -type f -name "pubspec.yaml" -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+
+          if [ "${#PUBSPECS[@]}" -eq 0 ]; then
             echo "pubspec.yaml tidak ditemukan"
             exit 1
           fi
-          DIR=$(dirname "$PUBSPEC")
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+          PUBSPEC="${PUBSPECS[0]}"
+          PROJECT_DIR="$(dirname "$PUBSPEC")"
+
+          echo "PUBSPEC=$PUBSPEC"
+          echo "PROJECT_DIR=$PROJECT_DIR"
+
+          echo "Semua pubspec:"
+          printf '%s\n' "${PUBSPECS[@]}"
+
+          echo "Dependency dartssh2:"
+          grep -n "dartssh2" "$PUBSPEC" || true
+
+          echo "Dependency awesome_notifications:"
+          grep -n "awesome_notifications" "$PUBSPEC" || true
+
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "pubspec=$PUBSPEC" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Project
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
+          test -f "$PROJECT_DIR/pubspec.yaml"
+
           cd "$PROJECT_DIR"
+
+          echo "Project: $PROJECT_DIR"
+          echo "Pubspec:"
+          cat pubspec.yaml
 
           if [ ! -d android ]; then
             flutter create --platforms=android .
@@ -85,28 +110,29 @@ jobs:
 
           flutter clean
           rm -rf .dart_tool build
+          rm -f pubspec.lock
+
+          flutter --version
+          dart --version
+
           flutter pub get
+
+          test -f pubspec.lock
 
       - name: Configure Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
+          mkdir -p android
           touch android/gradle.properties
 
           grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
           grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
           grep -q '^org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
-
-      - name: Analyze Project
-        env:
-          PROJECT_DIR: ${{ steps.project.outputs.dir }}
-        run: |
-          set -e
-          cd "$PROJECT_DIR"
-          flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
       - name: Build APK
         env:
@@ -114,15 +140,23 @@ jobs:
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
-          if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug
-          elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk --profile
-          else
-            flutter build apk --release
-          fi
+          case "$BUILD_TYPE" in
+            debug)
+              flutter build apk --debug
+              ;;
+            profile)
+              flutter build apk --profile
+              ;;
+            release)
+              flutter build apk --release
+              ;;
+            *)
+              flutter build apk --debug
+              ;;
+          esac
 
       - name: Find APK
         id: apk
@@ -131,13 +165,15 @@ jobs:
         run: |
           set -e
 
-          APK=$(find "$PROJECT_DIR/build/app/outputs" -type f -name "*.apk" -print -quit)
+          APK="$(find "$PROJECT_DIR/build/app/outputs" -type f -name "*.apk" -print | head -n 1)"
 
           if [ -z "$APK" ]; then
             echo "APK tidak ditemukan"
+            find "$PROJECT_DIR/build" -type f 2>/dev/null || true
             exit 1
           fi
 
+          echo "APK=$APK"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK Artifact
@@ -154,6 +190,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -e
+
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Build $TAG" \
@@ -168,6 +205,7 @@ jobs:
           APK: ${{ steps.apk.outputs.path }}
         run: |
           set -e
+
           gh release upload "$TAG" \
             "$APK" \
             --repo "$GITHUB_REPOSITORY" \
@@ -179,6 +217,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -e
+
           gh release edit "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
