@@ -29,13 +29,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -49,6 +42,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
+
           rm -rf project
           mkdir -p project
 
@@ -67,7 +61,9 @@ jobs:
             -o project/project.zip
 
           test -s project/project.zip
+
           unzip -q project/project.zip -d project
+
           rm -f project/project.zip
 
       - name: Find Flutter Project
@@ -77,7 +73,7 @@ jobs:
 
           PUBSPEC=$(find project \
             -type f \
-            -name pubspec.yaml \
+            -name "pubspec.yaml" \
             -print \
             -quit)
 
@@ -86,13 +82,15 @@ jobs:
           fi
 
           DIR=$(dirname "$PUBSPEC")
+
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Project
+      - name: Prepare Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
           if [ ! -f lib/main.dart ]; then
@@ -110,6 +108,7 @@ jobs:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
           touch android/gradle.properties
@@ -128,9 +127,11 @@ jobs:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
           rm -rf .dart_tool build
+
           flutter pub get
 
       - name: Build APK
@@ -139,6 +140,7 @@ jobs:
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
           if [ "$BUILD_TYPE" = "debug" ]; then
@@ -166,7 +168,11 @@ jobs:
             exit 1
           fi
 
-          echo "path=$(realpath "$APK")" >> "$GITHUB_OUTPUT"
+          APK=$(realpath "$APK")
+
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+          ls -lh "$APK"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -185,6 +191,7 @@ jobs:
 
           if ! gh release view "$TAG" \
             --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Build $TAG" \
