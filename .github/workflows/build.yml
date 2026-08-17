@@ -42,10 +42,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
-
           mkdir -p project
           curl -L \
-            --fail \
+            --fail-with-body \
             --retry 5 \
             --retry-delay 3 \
             --connect-timeout 30 \
@@ -55,38 +54,18 @@ jobs:
             -H "User-Agent: FlutterBuildBot" \
             "$ZIP_URL" \
             -o project/project.zip
-
           test -s project/project.zip
           unzip -q project/project.zip -d project
+          rm -f project/project.zip
 
       - name: Find Flutter Project
         id: project
         run: |
           set -e
-
-          PUBSPEC=$(find project \
-            -type f \
-            -name pubspec.yaml \
-            -print \
-            -quit)
-
-          if [ -z "$PUBSPEC" ]; then
-            echo "pubspec.yaml tidak ditemukan"
-            exit 1
-          fi
-
+          PUBSPEC=$(find project -type f -name pubspec.yaml -print -quit)
+          test -n "$PUBSPEC"
           DIR=$(dirname "$PUBSPEC")
-
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "Flutter project: $DIR"
-
-      - name: Install Dependencies
-        env:
-          PROJECT_DIR: ${{ steps.project.outputs.dir }}
-        run: |
-          set -e
-          cd "$PROJECT_DIR"
-          flutter pub get
 
       - name: Prepare Android
         env:
@@ -99,20 +78,51 @@ jobs:
             flutter create --platforms=android .
           fi
 
+          if [ -f android/gradle.properties ]; then
+            grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
+            grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+          else
+            printf '%s\n' \
+              'android.useAndroidX=true' \
+              'android.enableJetifier=true' \
+              > android/gradle.properties
+          fi
+
+      - name: Install Dependencies
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter clean
+          rm -rf .dart_tool build
+          flutter pub get
+
+      - name: Analyze Project
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+
       - name: Build APK
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
-          set -e
+          set -o pipefail
           cd "$PROJECT_DIR"
 
+          rm -rf build
+          flutter pub get
+
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug
+            flutter build apk --debug 2>&1 | tee build.log
           elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk --profile
+            flutter build apk --profile 2>&1 | tee build.log
           else
-            flutter build apk --release
+            flutter build apk --release 2>&1 | tee build.log
           fi
 
       - name: Find APK
@@ -121,18 +131,12 @@ jobs:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
-
           APK=$(find "$PROJECT_DIR/build/app/outputs" \
             -type f \
             -name "*.apk" \
             -print \
             -quit)
-
-          if [ -z "$APK" ]; then
-            echo "APK tidak ditemukan"
-            exit 1
-          fi
-
+          test -n "$APK"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
           ls -lh "$APK"
 
@@ -145,21 +149,16 @@ jobs:
           retention-days: 7
 
       - name: Create Release
-        id: release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ inputs.tag }}
         run: |
           set -e
-
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Build $TAG" \
             --prerelease \
-            --draft \
             --generate-notes=false
-
-          echo "Release dibuat: $TAG"
 
       - name: Upload APK Release
         env:
@@ -168,21 +167,10 @@ jobs:
           APK: ${{ steps.apk.outputs.path }}
         run: |
           set -e
-
           gh release upload "$TAG" \
             "$APK" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-      - name: Publish Release
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -e
-
-          gh release edit "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false
-
-          echo "BUILD SUCCESS"
+      - name: Build Success
+        run: echo "BUILD SUCCESS"
