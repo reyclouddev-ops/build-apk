@@ -178,6 +178,39 @@ jobs:
 
           test -f pubspec.lock
 
+      - name: Fix Dart 3.13 Compatibility
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if grep -qE '^[[:space:]]*dartssh2:' pubspec.yaml; then
+            LOCK_VERSION=$(awk '
+              /^  dartssh2:/ {
+                found=1
+                next
+              }
+              found && /^[[:space:]]+version:/ {
+                gsub(/"/, "", $2)
+                print $2
+                exit
+              }
+              found && /^  [a-zA-Z0-9_]+:/ {
+                exit
+              }
+            ' pubspec.lock)
+
+            if [ "$LOCK_VERSION" = "2.14.0" ]; then
+              TARGET="$HOME/.pub-cache/hosted/pub.dev/dartssh2-$LOCK_VERSION/lib/src/sftp/sftp_client.dart"
+
+              if [ -f "$TARGET" ]; then
+                python3 -c 'import sys; p=sys.argv[1]; d=open(p, encoding="utf-8").read(); old="if (bytessRecieved >= length) {"; new="if (length != null && bytessRecieved >= length) {"; d=d.replace(old,new,1); open(p,"w",encoding="utf-8").write(d); print("dartssh2 compatibility patch applied")' "$TARGET"
+              fi
+            fi
+          fi
+
       - name: Configure Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
