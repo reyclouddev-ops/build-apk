@@ -27,13 +27,20 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: "3.47.0"
+          flutter-version: "3.29.2"
           cache: true
 
       - name: Download Project
@@ -42,97 +49,79 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
-
           rm -rf project
           mkdir -p project
-
-          curl \
-            --location \
+          curl -L \
             --fail-with-body \
             --retry 5 \
             --retry-all-errors \
             --retry-delay 3 \
             --connect-timeout 30 \
-            --max-time 900 \
+            --max-time 600 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
             -H "User-Agent: FlutterBuildBot" \
             "$ZIP_URL" \
             -o project/project.zip
-
           test -s project/project.zip
-
-          unzip -q project/project.zip -d project
-
+          unzip -oq project/project.zip -d project
           rm -f project/project.zip
 
       - name: Find Flutter Project
         id: project
         run: |
           set -e
-
-          PUBSPEC=$(find project \
-            -type f \
-            -name "pubspec.yaml" \
-            -print \
-            -quit)
-
+          PUBSPEC=$(find project -type f -name pubspec.yaml -print -quit)
           if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan"
             exit 1
           fi
-
           DIR=$(dirname "$PUBSPEC")
-
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare Android
+      - name: Prepare Project
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
-
           cd "$PROJECT_DIR"
-
-          if [ ! -f lib/main.dart ]; then
-            exit 1
-          fi
 
           if [ ! -d android ]; then
             flutter create --platforms=android .
           fi
 
-          chmod +x android/gradlew
+          rm -rf .dart_tool
+          rm -rf build
 
-      - name: Configure Android
-        env:
-          PROJECT_DIR: ${{ steps.project.outputs.dir }}
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          touch android/gradle.properties
-
-          grep -q "^android.useAndroidX=" android/gradle.properties || \
-            echo "android.useAndroidX=true" >> android/gradle.properties
-
-          grep -q "^android.enableJetifier=" android/gradle.properties || \
-            echo "android.enableJetifier=true" >> android/gradle.properties
-
-          grep -q "^org.gradle.jvmargs=" android/gradle.properties || \
-            echo "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" >> android/gradle.properties
-
-      - name: Install Dependencies
-        env:
-          PROJECT_DIR: ${{ steps.project.outputs.dir }}
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          rm -rf .dart_tool build
-
+          flutter clean
           flutter pub get
+
+      - name: Fix Android Configuration
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          if [ -f android/gradle.properties ]; then
+            grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
+            grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+          else
+            mkdir -p android
+            printf '%s\n' \
+              'android.useAndroidX=true' \
+              'android.enableJetifier=true' \
+              'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' \
+              > android/gradle.properties
+          fi
+
+      - name: Validate Project
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build APK
         env:
@@ -140,16 +129,22 @@ jobs:
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -e
-
           cd "$PROJECT_DIR"
 
-          if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug
-          elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk --profile
-          else
-            flutter build apk --release
-          fi
+          case "$BUILD_TYPE" in
+            debug)
+              flutter build apk --debug
+              ;;
+            profile)
+              flutter build apk --profile
+              ;;
+            release)
+              flutter build apk --release
+              ;;
+            *)
+              flutter build apk --release
+              ;;
+          esac
 
       - name: Find APK
         id: apk
@@ -158,21 +153,26 @@ jobs:
         run: |
           set -e
 
-          APK=$(find "$PROJECT_DIR/build/app/outputs" \
+          APK=$(find "$PROJECT_DIR/build/app/outputs/apk" \
             -type f \
             -name "*.apk" \
             -print \
             -quit)
 
           if [ -z "$APK" ]; then
+            APK=$(find "$PROJECT_DIR/build/app/outputs" \
+              -type f \
+              -name "*.apk" \
+              -print \
+              -quit)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "APK tidak ditemukan"
             exit 1
           fi
 
-          APK=$(realpath "$APK")
-
           echo "path=$APK" >> "$GITHUB_OUTPUT"
-
-          ls -lh "$APK"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -189,15 +189,12 @@ jobs:
         run: |
           set -e
 
-          if ! gh release view "$TAG" \
-            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "Build $TAG" \
-              --prerelease \
-              --generate-notes=false
-          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build $TAG" \
+            --prerelease \
+            --draft \
+            --generate-notes=false
 
       - name: Upload APK Release
         env:
@@ -212,6 +209,13 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-      - name: Complete
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          TAG: ${{ inputs.tag }}
         run: |
-          echo "BUILD SUCCESS"
+          set -e
+
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
