@@ -42,8 +42,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
+
           rm -rf project
           mkdir -p project
+
           curl -L \
             --fail-with-body \
             --retry 5 \
@@ -56,38 +58,92 @@ jobs:
             -H "User-Agent: FlutterBuildBot" \
             "$ZIP_URL" \
             -o project/project.zip
+
           test -s project/project.zip
+
           unzip -oq project/project.zip -d project
+
           rm -f project/project.zip
 
-      - name: Find Latest Flutter Project
+      - name: Find Flutter Project
         id: project
         run: |
           set -e
 
-          mapfile -t PUBSPECS < <(find "$GITHUB_WORKSPACE/project" -type f -name "pubspec.yaml" -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+          ROOT="$GITHUB_WORKSPACE/project"
+          SELECTED=""
+
+          mapfile -t PUBSPECS < <(
+            find "$ROOT" \
+              -type f \
+              -name "pubspec.yaml" \
+              -not -path "*/.dart_tool/*" \
+              -not -path "*/build/*" \
+              -print
+          )
 
           if [ "${#PUBSPECS[@]}" -eq 0 ]; then
-            echo "pubspec.yaml tidak ditemukan"
+            echo "Flutter project tidak ditemukan"
             exit 1
           fi
 
-          PUBSPEC="${PUBSPECS[0]}"
-          PROJECT_DIR="$(dirname "$PUBSPEC")"
+          for PUBSPEC in "${PUBSPECS[@]}"; do
+            DIR="$(dirname "$PUBSPEC")"
 
-          echo "PUBSPEC=$PUBSPEC"
-          echo "PROJECT_DIR=$PROJECT_DIR"
+            if [ ! -d "$DIR/lib" ]; then
+              continue
+            fi
 
-          echo "Semua pubspec:"
-          printf '%s\n' "${PUBSPECS[@]}"
+            if grep -qE '^[[:space:]]*flutter:[[:space:]]*$' "$PUBSPEC"; then
+              if [ -d "$DIR/android" ]; then
+                SELECTED="$DIR"
+                break
+              fi
 
-          echo "Dependency dartssh2:"
-          grep -n "dartssh2" "$PUBSPEC" || true
+              if [ -z "$SELECTED" ]; then
+                SELECTED="$DIR"
+              fi
+            fi
+          done
 
-          echo "Dependency awesome_notifications:"
-          grep -n "awesome_notifications" "$PUBSPEC" || true
+          if [ -z "$SELECTED" ]; then
+            for PUBSPEC in "${PUBSPECS[@]}"; do
+              DIR="$(dirname "$PUBSPEC")"
 
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+              if [ -d "$DIR/lib" ]; then
+                SELECTED="$DIR"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$SELECTED" ]; then
+            echo "Tidak dapat menentukan Flutter project"
+            printf '%s\n' "${PUBSPECS[@]}"
+            exit 1
+          fi
+
+          PUBSPEC="$SELECTED/pubspec.yaml"
+
+          echo "Selected project:"
+          echo "$SELECTED"
+
+          echo "Selected pubspec:"
+          echo "$PUBSPEC"
+
+          echo "Project name:"
+          grep -E '^name:' "$PUBSPEC" || true
+
+          echo "Project version:"
+          grep -E '^version:' "$PUBSPEC" || true
+
+          echo "Flutter environment:"
+          grep -A2 '^environment:' "$PUBSPEC" || true
+
+          echo "Dependencies:"
+          sed -n '/^dependencies:/,/^dev_dependencies:/p' "$PUBSPEC" || true
+
+          echo "dir=$SELECTED" >> "$GITHUB_OUTPUT"
           echo "pubspec=$PUBSPEC" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Project
@@ -96,24 +152,27 @@ jobs:
         run: |
           set -e
 
-          test -f "$PROJECT_DIR/pubspec.yaml"
-
           cd "$PROJECT_DIR"
 
-          echo "Project: $PROJECT_DIR"
-          echo "Pubspec:"
-          cat pubspec.yaml
+          test -f pubspec.yaml
+
+          echo "Working directory:"
+          pwd
+
+          echo "Flutter:"
+          flutter --version
+
+          echo "Dart:"
+          dart --version
 
           if [ ! -d android ]; then
             flutter create --platforms=android .
           fi
 
           flutter clean
-          rm -rf .dart_tool build
-          rm -f pubspec.lock
 
-          flutter --version
-          dart --version
+          rm -rf .dart_tool
+          rm -rf build
 
           flutter pub get
 
@@ -128,11 +187,20 @@ jobs:
           cd "$PROJECT_DIR"
 
           mkdir -p android
+
           touch android/gradle.properties
 
-          grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
-          grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
-          grep -q '^org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
+          if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
+            echo 'android.useAndroidX=true' >> android/gradle.properties
+          fi
+
+          if ! grep -q '^android.enableJetifier=' android/gradle.properties; then
+            echo 'android.enableJetifier=true' >> android/gradle.properties
+          fi
+
+          if ! grep -q '^org.gradle.jvmargs=' android/gradle.properties; then
+            echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
+          fi
 
       - name: Build APK
         env:
@@ -154,7 +222,8 @@ jobs:
               flutter build apk --release
               ;;
             *)
-              flutter build apk --debug
+              echo "Build type tidak valid: $BUILD_TYPE"
+              exit 1
               ;;
           esac
 
@@ -165,15 +234,26 @@ jobs:
         run: |
           set -e
 
-          APK="$(find "$PROJECT_DIR/build/app/outputs" -type f -name "*.apk" -print | head -n 1)"
+          APK="$(find "$PROJECT_DIR/build/app/outputs" \
+            -type f \
+            -name "*.apk" \
+            -print \
+            | head -n 1)"
 
           if [ -z "$APK" ]; then
             echo "APK tidak ditemukan"
-            find "$PROJECT_DIR/build" -type f 2>/dev/null || true
+
+            find "$PROJECT_DIR/build" \
+              -type f \
+              -print \
+              2>/dev/null || true
+
             exit 1
           fi
 
-          echo "APK=$APK"
+          echo "APK:"
+          echo "$APK"
+
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK Artifact
