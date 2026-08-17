@@ -29,6 +29,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -36,20 +43,35 @@ jobs:
           flutter-version: "3.47.0"
           cache: true
 
+      - name: Flutter Info
+        run: |
+          flutter --version
+          dart --version
+          java -version
+
       - name: Download Project
         env:
           ZIP_URL: ${{ inputs.zip_url }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -e
+
+          rm -rf project
           mkdir -p project
 
-          curl -L \
+          if [ -z "$ZIP_URL" ]; then
+            echo "ZIP_URL kosong"
+            exit 1
+          fi
+
+          curl \
+            --location \
             --fail-with-body \
             --retry 5 \
+            --retry-all-errors \
             --retry-delay 3 \
             --connect-timeout 30 \
-            --max-time 600 \
+            --max-time 900 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/octet-stream" \
             -H "User-Agent: FlutterBuildBot" \
@@ -57,85 +79,203 @@ jobs:
             -o project/project.zip
 
           test -s project/project.zip
-          unzip -q project/project.zip -d project
+
+          unzip -q project/project.zip -d project/unpacked
+
           rm -f project/project.zip
+
+          echo "Project berhasil di-download"
 
       - name: Find Flutter Project
         id: project
         run: |
           set -e
 
-          PUBSPEC=$(find project \
+          PUBSPEC=$(find project/unpacked \
             -type f \
-            -name pubspec.yaml \
+            -name "pubspec.yaml" \
             -print \
             -quit)
 
-          test -n "$PUBSPEC"
+          if [ -z "$PUBSPEC" ]; then
+            echo "pubspec.yaml tidak ditemukan"
+            find project/unpacked -maxdepth 4 -type f | head -200
+            exit 1
+          fi
 
-          DIR=$(dirname "$PUBSPEC")
+          PROJECT_DIR=$(dirname "$PUBSPEC")
 
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "Flutter project: $DIR"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Flutter project:"
+          echo "$PROJECT_DIR"
+
+      - name: Validate Project
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          test -f pubspec.yaml
+
+          echo "pubspec.yaml ditemukan"
+
+          if [ ! -d lib ]; then
+            echo "Folder lib tidak ditemukan"
+            exit 1
+          fi
+
+          if [ ! -f lib/main.dart ]; then
+            echo "lib/main.dart tidak ditemukan"
+            find lib -maxdepth 2 -type f | head -100
+            exit 1
+          fi
 
       - name: Prepare Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
           if [ ! -d android ]; then
             flutter create --platforms=android .
           fi
 
-          mkdir -p android
-
-          if [ -f android/gradle.properties ]; then
-            grep -q '^android.useAndroidX=' android/gradle.properties || \
-              echo 'android.useAndroidX=true' >> android/gradle.properties
-
-            grep -q '^android.enableJetifier=' android/gradle.properties || \
-              echo 'android.enableJetifier=true' >> android/gradle.properties
-          else
-            printf '%s\n' \
-              'android.useAndroidX=true' \
-              'android.enableJetifier=true' \
-              > android/gradle.properties
+          if [ ! -f android/gradlew ]; then
+            flutter create --platforms=android .
           fi
 
-      - name: Clean Project
+          chmod +x android/gradlew
+
+      - name: Configure Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
 
-          flutter clean
-          rm -rf .dart_tool
-          rm -rf build
-          rm -rf android/.gradle
-          rm -rf android/app/build
+          if [ -f android/gradle.properties ]; then
+            grep -q "^android.useAndroidX=" android/gradle.properties || \
+              echo "android.useAndroidX=true" >> android/gradle.properties
+
+            grep -q "^android.enableJetifier=" android/gradle.properties || \
+              echo "android.enableJetifier=true" >> android/gradle.properties
+          else
+            cat > android/gradle.properties <<'EOF'
+android.useAndroidX=true
+android.enableJetifier=true
+org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+EOF
+          fi
+
+          echo "Android configuration:"
+          cat android/gradle.properties
 
       - name: Install Dependencies
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
+
           cd "$PROJECT_DIR"
+
+          rm -rf .dart_tool
 
           flutter pub get
 
-      - name: Verify Dart Sources
+      - name: Check Assets
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
-          set -e
           cd "$PROJECT_DIR"
 
-          test -f pubspec.yaml
-          test -d lib
-          test -f lib/main.dart
+          if [ -f pubspec.yaml ]; then
+            python3 - <<'PY'
+import os
+import re
+
+path = "pubspec.yaml"
+
+with open(path, "r", encoding="utf-8") as f:
+    text = f.read()
+
+assets = []
+inside = False
+base_indent = None
+
+for line in text.splitlines():
+    if re.match(r"^\s*assets:\s*$", line):
+        inside = True
+        base_indent = len(line) - len(line.lstrip())
+        continue
+
+    if inside:
+        if not line.strip():
+            continue
+
+        indent = len(line) - len(line.lstrip())
+
+        if indent <= base_indent and not line.lstrip().startswith("-"):
+            inside = False
+            continue
+
+        match = re.match(r"^\s*-\s+(.+?)\s*$", line)
+
+        if match:
+            value = match.group(1).strip().strip("'\"")
+
+            if value and not value.startswith("#"):
+                assets.append(value)
+
+missing = []
+
+for asset in assets:
+    if "*" in asset:
+        continue
+
+    if not os.path.exists(asset):
+        missing.append(asset)
+
+if missing:
+    print("Asset yang tidak ditemukan:")
+
+    for item in missing:
+        print(" -", item)
+
+    print("")
+    print("Build dihentikan karena asset yang terdaftar tidak ditemukan.")
+    raise SystemExit(1)
+
+print("Asset check OK")
+PY
+
+      - name: Analyze Project
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set +e
+
+          cd "$PROJECT_DIR"
+
+          flutter analyze \
+            --no-fatal-infos \
+            --no-fatal-warnings \
+            2>&1 | tee analyze.log
+
+          STATUS=${PIPESTATUS[0]}
+
+          echo "Flutter analyze exit code: $STATUS"
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Flutter analyze menemukan error."
+            echo "Build tidak dilanjutkan."
+            exit "$STATUS"
+          fi
 
       - name: Build APK
         env:
@@ -143,17 +283,64 @@ jobs:
           BUILD_TYPE: ${{ inputs.build_type }}
         run: |
           set -o pipefail
+
           cd "$PROJECT_DIR"
 
           rm -rf build
 
           if [ "$BUILD_TYPE" = "debug" ]; then
-            flutter build apk --debug --verbose 2>&1 | tee build.log
+            flutter build apk \
+              --debug \
+              --verbose \
+              2>&1 | tee build.log
+
           elif [ "$BUILD_TYPE" = "profile" ]; then
-            flutter build apk --profile --verbose 2>&1 | tee build.log
+            flutter build apk \
+              --profile \
+              --verbose \
+              2>&1 | tee build.log
+
           else
-            flutter build apk --release --verbose 2>&1 | tee build.log
+            flutter build apk \
+              --release \
+              --verbose \
+              2>&1 | tee build.log
           fi
+
+      - name: Collect Build Logs
+        if: always()
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set +e
+
+          mkdir -p build-logs
+
+          if [ -f "$PROJECT_DIR/analyze.log" ]; then
+            cp "$PROJECT_DIR/analyze.log" build-logs/analyze.log
+          fi
+
+          if [ -f "$PROJECT_DIR/build.log" ]; then
+            cp "$PROJECT_DIR/build.log" build-logs/build.log
+          fi
+
+          if [ -d "$PROJECT_DIR/build/reports" ]; then
+            cp -r "$PROJECT_DIR/build/reports" build-logs/gradle-reports
+          fi
+
+          if [ -d "$PROJECT_DIR/android/build/reports" ]; then
+            cp -r "$PROJECT_DIR/android/build/reports" build-logs/android-reports
+          fi
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-log-${{ inputs.tag }}
+          path: build-logs
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 6
 
       - name: Find APK
         id: apk
@@ -168,20 +355,24 @@ jobs:
             -print \
             -quit)
 
-          test -n "$APK"
+          if [ -z "$APK" ]; then
+            echo "APK tidak ditemukan"
+            echo "Isi output build:"
 
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          ls -lh "$APK"
+            find "$PROJECT_DIR/build/app/outputs" \
+              -maxdepth 5 \
+              -type f \
+              -print || true
 
-      - name: Upload Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flutter-build-log-${{ inputs.tag }}
-          path: |
-            ${{ steps.project.outputs.dir }}/build.log
-          if-no-files-found: ignore
-          retention-days: 7
+            exit 1
+          fi
+
+          APK_ABS=$(realpath "$APK")
+
+          echo "path=$APK_ABS" >> "$GITHUB_OUTPUT"
+
+          echo "APK ditemukan:"
+          ls -lh "$APK_ABS"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -190,25 +381,30 @@ jobs:
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 7
+          compression-level: 6
 
       - name: Create Release
+        id: release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ inputs.tag }}
         run: |
           set -e
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --yes
-          fi
+          if gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
 
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Build $TAG" \
-            --prerelease \
-            --generate-notes=false
+            echo "Release $TAG sudah ada"
+
+          else
+
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Build $TAG" \
+              --prerelease \
+              --generate-notes=false
+
+          fi
 
       - name: Upload APK Release
         env:
@@ -226,3 +422,4 @@ jobs:
       - name: Build Success
         run: |
           echo "BUILD SUCCESS"
+          echo "APK berhasil dibuat."
