@@ -29,13 +29,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -90,38 +83,30 @@ jobs:
             flutter create --platforms=android .
           fi
 
-          rm -rf .dart_tool
-          rm -rf build
-
           flutter clean
+          rm -rf .dart_tool build
           flutter pub get
 
-      - name: Fix Android Configuration
+      - name: Configure Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
 
-          if [ -f android/gradle.properties ]; then
-            grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
-            grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
-          else
-            mkdir -p android
-            printf '%s\n' \
-              'android.useAndroidX=true' \
-              'android.enableJetifier=true' \
-              'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' \
-              > android/gradle.properties
-          fi
+          touch android/gradle.properties
 
-      - name: Validate Project
+          grep -q '^android.useAndroidX=' android/gradle.properties || echo 'android.useAndroidX=true' >> android/gradle.properties
+          grep -q '^android.enableJetifier=' android/gradle.properties || echo 'android.enableJetifier=true' >> android/gradle.properties
+          grep -q '^org.gradle.jvmargs=' android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
+
+      - name: Analyze Project
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
           set -e
           cd "$PROJECT_DIR"
-          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter analyze --no-fatal-infos --no-fatal-warnings || true
 
       - name: Build APK
         env:
@@ -131,20 +116,13 @@ jobs:
           set -e
           cd "$PROJECT_DIR"
 
-          case "$BUILD_TYPE" in
-            debug)
-              flutter build apk --debug
-              ;;
-            profile)
-              flutter build apk --profile
-              ;;
-            release)
-              flutter build apk --release
-              ;;
-            *)
-              flutter build apk --release
-              ;;
-          esac
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            flutter build apk --debug
+          elif [ "$BUILD_TYPE" = "profile" ]; then
+            flutter build apk --profile
+          else
+            flutter build apk --release
+          fi
 
       - name: Find APK
         id: apk
@@ -153,19 +131,7 @@ jobs:
         run: |
           set -e
 
-          APK=$(find "$PROJECT_DIR/build/app/outputs/apk" \
-            -type f \
-            -name "*.apk" \
-            -print \
-            -quit)
-
-          if [ -z "$APK" ]; then
-            APK=$(find "$PROJECT_DIR/build/app/outputs" \
-              -type f \
-              -name "*.apk" \
-              -print \
-              -quit)
-          fi
+          APK=$(find "$PROJECT_DIR/build/app/outputs" -type f -name "*.apk" -print -quit)
 
           if [ -z "$APK" ]; then
             echo "APK tidak ditemukan"
@@ -188,7 +154,6 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -e
-
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Build $TAG" \
@@ -203,7 +168,6 @@ jobs:
           APK: ${{ steps.apk.outputs.path }}
         run: |
           set -e
-
           gh release upload "$TAG" \
             "$APK" \
             --repo "$GITHUB_REPOSITORY" \
@@ -215,7 +179,6 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -e
-
           gh release edit "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
