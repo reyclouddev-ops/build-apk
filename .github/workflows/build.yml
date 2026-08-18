@@ -120,7 +120,6 @@ jobs:
           fi
 
           echo "Project: $SELECTED"
-
           echo "dir=$SELECTED" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Project
@@ -137,41 +136,14 @@ jobs:
           flutter --version
           dart --version
 
-          ANDROID_VALID=true
-
           if [ ! -d android ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/settings.gradle ] && \
-             [ ! -f android/settings.gradle.kts ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/app/build.gradle ] && \
-             [ ! -f android/app/build.gradle.kts ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/gradlew ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ "$ANDROID_VALID" = "false" ]; then
-            rm -rf android
-
+            echo "android/ tidak ditemukan, membuat platform Android..."
             flutter create \
               --platforms=android \
               --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
               .
+          else
+            echo "android/ ditemukan, menggunakan Android project dari ZIP."
           fi
 
           test -d android
@@ -189,6 +161,11 @@ jobs:
           rm -rf build
 
           flutter pub get
+
+          if grep -q "flutter_launcher_icons:" pubspec.yaml; then
+            echo "Generating launcher icons..."
+            dart run flutter_launcher_icons
+          fi
 
           test -f pubspec.lock
 
@@ -248,6 +225,38 @@ jobs:
           if ! grep -q '^org.gradle.jvmargs=' android/gradle.properties; then
             echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
           fi
+
+      - name: Verify App Configuration
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== PUBSPEC ==="
+          grep -E '^(name|version):' pubspec.yaml || true
+
+          echo "=== ICON CONFIG ==="
+          grep -A5 -B2 'flutter_launcher_icons:' pubspec.yaml || true
+
+          echo "=== ANDROID MANIFEST ==="
+          grep -E 'android:label|android:icon|usesCleartextTraffic' \
+            android/app/src/main/AndroidManifest.xml || true
+
+          echo "=== ICON FILE ==="
+
+          if [ -f "assest/icon/icon.png" ]; then
+            echo "assest/icon/icon.png ditemukan"
+          else
+            echo "WARNING: assest/icon/icon.png tidak ditemukan"
+          fi
+
+          echo "=== GENERATED ICONS ==="
+          find android/app/src/main/res \
+            -type f \
+            \( -name "ic_launcher*" -o -name "*launcher*" \) \
+            -print 2>/dev/null || true
 
       - name: Build APK
         env:
