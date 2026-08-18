@@ -165,8 +165,42 @@ jobs:
           echo "Dart:"
           dart --version
 
+          ANDROID_VALID=true
+
           if [ ! -d android ]; then
-            flutter create --platforms=android .
+            ANDROID_VALID=false
+          fi
+
+          if [ ! -f android/settings.gradle ] && \
+             [ ! -f android/settings.gradle.kts ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ ! -f android/app/build.gradle ] && \
+             [ ! -f android/app/build.gradle.kts ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ ! -f android/gradle.properties ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ "$ANDROID_VALID" = "false" ]; then
+            echo "Android project tidak lengkap."
+            echo "Membuat Android project baru."
+
+            rm -rf android
+
+            flutter create \
+              --platforms=android \
+              .
+          else
+            echo "Android project lengkap ditemukan."
+            echo "Skip flutter create."
           fi
 
           flutter clean
