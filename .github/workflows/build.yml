@@ -46,18 +46,32 @@ jobs:
           rm -rf project
           mkdir -p project
 
-          curl -L \
-            --fail-with-body \
-            --retry 5 \
-            --retry-all-errors \
-            --retry-delay 3 \
-            --connect-timeout 30 \
-            --max-time 600 \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/octet-stream" \
-            -H "User-Agent: FlutterBuildBot" \
-            "$ZIP_URL" \
-            -o project/project.zip
+          if [ -n "$GH_TOKEN" ]; then
+            curl -L \
+              --fail-with-body \
+              --retry 5 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -H "User-Agent: FlutterBuildBot" \
+              "$ZIP_URL" \
+              -o project/project.zip
+          else
+            curl -L \
+              --fail-with-body \
+              --retry 5 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 30 \
+              --max-time 600 \
+              -H "Accept: application/octet-stream" \
+              -H "User-Agent: FlutterBuildBot" \
+              "$ZIP_URL" \
+              -o project/project.zip
+          fi
 
           test -s project/project.zip
 
@@ -146,53 +160,45 @@ jobs:
 
           test -f pubspec.yaml
 
-          echo "Working directory:"
-          pwd
-
           flutter --version
           dart --version
 
-          ANDROID_VALID=true
-
           if [ ! -d android ]; then
-            ANDROID_VALID=false
+            flutter create \
+              --platforms=android \
+              .
+          fi
+
+          test -d android
+
+          if [ ! -f android/app/build.gradle ] && \
+             [ ! -f android/app/build.gradle.kts ]; then
+            echo "Android Gradle file tidak ditemukan"
+            exit 1
           fi
 
           if [ ! -f android/settings.gradle ] && \
              [ ! -f android/settings.gradle.kts ]; then
-            ANDROID_VALID=false
-          fi
-
-          if [ ! -f android/app/build.gradle ] && \
-             [ ! -f android/app/build.gradle.kts ]; then
-            ANDROID_VALID=false
+            echo "Android settings file tidak ditemukan"
+            exit 1
           fi
 
           if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            ANDROID_VALID=false
+            echo "AndroidManifest.xml tidak ditemukan"
+            exit 1
           fi
 
           if [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            ANDROID_VALID=false
+            echo "Gradle wrapper tidak ditemukan"
+            exit 1
           fi
 
           if [ ! -f android/gradlew ]; then
-            ANDROID_VALID=false
+            echo "gradlew tidak ditemukan"
+            exit 1
           fi
 
-          if [ "$ANDROID_VALID" = "false" ]; then
-            echo "Android project tidak lengkap."
-            echo "Membuat Android project baru."
-
-            rm -rf android
-
-            flutter create \
-              --platforms=android \
-              .
-          else
-            echo "Android project lengkap."
-            echo "Konfigurasi Android user dipertahankan."
-          fi
+          chmod +x android/gradlew
 
           flutter clean
 
@@ -231,7 +237,7 @@ jobs:
               TARGET="$HOME/.pub-cache/hosted/pub.dev/dartssh2-$LOCK_VERSION/lib/src/sftp/sftp_client.dart"
 
               if [ -f "$TARGET" ]; then
-                python3 -c 'import sys; p=sys.argv[1]; d=open(p, encoding="utf-8").read(); old="if (bytessRecieved >= length) {"; new="if (length != null && bytessRecieved >= length) {"; d=d.replace(old,new,1); open(p,"w",encoding="utf-8").write(d); print("dartssh2 compatibility patch applied")' "$TARGET"
+                python3 -c 'import sys; p=sys.argv[1]; d=open(p, encoding="utf-8").read(); old="if (bytessRecieved >= length) {"; new="if (length != null && bytessRecieved >= length) {"; d=d.replace(old,new,1); open(p,"w",encoding="utf-8").write(d)' "$TARGET"
               fi
             fi
           fi
@@ -245,7 +251,10 @@ jobs:
           cd "$PROJECT_DIR"
 
           test -d android
-          test -f android/gradle.properties
+
+          if [ ! -f android/gradle.properties ]; then
+            touch android/gradle.properties
+          fi
 
           if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
             echo 'android.useAndroidX=true' >> android/gradle.properties
