@@ -46,32 +46,18 @@ jobs:
           rm -rf project
           mkdir -p project
 
-          if [ -n "$GH_TOKEN" ]; then
-            curl -L \
-              --fail-with-body \
-              --retry 5 \
-              --retry-all-errors \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/octet-stream" \
-              -H "User-Agent: FlutterBuildBot" \
-              "$ZIP_URL" \
-              -o project/project.zip
-          else
-            curl -L \
-              --fail-with-body \
-              --retry 5 \
-              --retry-all-errors \
-              --retry-delay 3 \
-              --connect-timeout 30 \
-              --max-time 600 \
-              -H "Accept: application/octet-stream" \
-              -H "User-Agent: FlutterBuildBot" \
-              "$ZIP_URL" \
-              -o project/project.zip
-          fi
+          curl -L \
+            --fail-with-body \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 600 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -H "User-Agent: FlutterBuildBot" \
+            "$ZIP_URL" \
+            -o project/project.zip
 
           test -s project/project.zip
 
@@ -109,13 +95,10 @@ jobs:
             fi
 
             if grep -qE '^[[:space:]]*flutter:[[:space:]]*$' "$PUBSPEC"; then
-              if [ -d "$DIR/android" ]; then
-                SELECTED="$DIR"
-                break
-              fi
+              SELECTED="$DIR"
 
-              if [ -z "$SELECTED" ]; then
-                SELECTED="$DIR"
+              if [ -d "$DIR/android" ]; then
+                break
               fi
             fi
           done
@@ -136,19 +119,9 @@ jobs:
             exit 1
           fi
 
-          PUBSPEC="$SELECTED/pubspec.yaml"
-
-          echo "Selected project:"
-          echo "$SELECTED"
-
-          echo "Project name:"
-          grep -E '^name:' "$PUBSPEC" || true
-
-          echo "Project version:"
-          grep -E '^version:' "$PUBSPEC" || true
+          echo "Project: $SELECTED"
 
           echo "dir=$SELECTED" >> "$GITHUB_OUTPUT"
-          echo "pubspec=$PUBSPEC" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Project
         env:
@@ -159,44 +132,54 @@ jobs:
           cd "$PROJECT_DIR"
 
           test -f pubspec.yaml
+          test -d lib
 
           flutter --version
           dart --version
 
+          ANDROID_VALID=true
+
           if [ ! -d android ]; then
-            flutter create \
-              --platforms=android \
-              .
-          fi
-
-          test -d android
-
-          if [ ! -f android/app/build.gradle ] && \
-             [ ! -f android/app/build.gradle.kts ]; then
-            echo "Android Gradle file tidak ditemukan"
-            exit 1
+            ANDROID_VALID=false
           fi
 
           if [ ! -f android/settings.gradle ] && \
              [ ! -f android/settings.gradle.kts ]; then
-            echo "Android settings file tidak ditemukan"
-            exit 1
+            ANDROID_VALID=false
           fi
 
-          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            echo "AndroidManifest.xml tidak ditemukan"
-            exit 1
+          if [ ! -f android/app/build.gradle ] && \
+             [ ! -f android/app/build.gradle.kts ]; then
+            ANDROID_VALID=false
           fi
 
           if [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
-            echo "Gradle wrapper tidak ditemukan"
-            exit 1
+            ANDROID_VALID=false
           fi
 
           if [ ! -f android/gradlew ]; then
-            echo "gradlew tidak ditemukan"
-            exit 1
+            ANDROID_VALID=false
           fi
+
+          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ "$ANDROID_VALID" = "false" ]; then
+            rm -rf android
+
+            flutter create \
+              --platforms=android \
+              --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
+              .
+          fi
+
+          test -d android
+          test -f android/settings.gradle || test -f android/settings.gradle.kts
+          test -f android/app/build.gradle || test -f android/app/build.gradle.kts
+          test -f android/app/src/main/AndroidManifest.xml
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+          test -f android/gradlew
 
           chmod +x android/gradlew
 
@@ -237,7 +220,7 @@ jobs:
               TARGET="$HOME/.pub-cache/hosted/pub.dev/dartssh2-$LOCK_VERSION/lib/src/sftp/sftp_client.dart"
 
               if [ -f "$TARGET" ]; then
-                python3 -c 'import sys; p=sys.argv[1]; d=open(p, encoding="utf-8").read(); old="if (bytessRecieved >= length) {"; new="if (length != null && bytessRecieved >= length) {"; d=d.replace(old,new,1); open(p,"w",encoding="utf-8").write(d)' "$TARGET"
+                python3 -c 'import sys; p=sys.argv[1]; d=open(p,encoding="utf-8").read(); d=d.replace("if (bytessRecieved >= length) {","if (length != null && bytessRecieved >= length) {",1); open(p,"w",encoding="utf-8").write(d)' "$TARGET"
               fi
             fi
           fi
@@ -250,11 +233,9 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          test -d android
+          mkdir -p android
 
-          if [ ! -f android/gradle.properties ]; then
-            touch android/gradle.properties
-          fi
+          touch android/gradle.properties
 
           if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
             echo 'android.useAndroidX=true' >> android/gradle.properties
@@ -317,7 +298,7 @@ jobs:
             exit 1
           fi
 
-          echo "APK:"
+          echo "APK ditemukan:"
           echo "$APK"
 
           echo "path=$APK" >> "$GITHUB_OUTPUT"
