@@ -60,9 +60,7 @@ jobs:
             -o project/project.zip
 
           test -s project/project.zip
-
           unzip -oq project/project.zip -d project
-
           rm -f project/project.zip
 
       - name: Find Flutter Project
@@ -137,21 +135,42 @@ jobs:
           dart --version
 
           if [ ! -d android ]; then
-            echo "android/ tidak ditemukan, membuat platform Android..."
             flutter create \
               --platforms=android \
               --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
               .
-          else
-            echo "android/ ditemukan, menggunakan Android project dari ZIP."
           fi
 
-          test -d android
-          test -f android/settings.gradle || test -f android/settings.gradle.kts
-          test -f android/app/build.gradle || test -f android/app/build.gradle.kts
-          test -f android/app/src/main/AndroidManifest.xml
-          test -f android/gradle/wrapper/gradle-wrapper.properties
-          test -f android/gradlew
+          if [ -f android/settings.gradle.kts ]; then
+            echo "settings.gradle.kts OK"
+          elif [ -f android/settings.gradle ]; then
+            echo "settings.gradle OK"
+          else
+            echo "Android settings tidak ditemukan"
+            exit 1
+          fi
+
+          if [ -f android/app/build.gradle.kts ]; then
+            echo "build.gradle.kts OK"
+          elif [ -f android/app/build.gradle ]; then
+            echo "build.gradle OK"
+          else
+            echo "Android build.gradle tidak ditemukan"
+            exit 1
+          fi
+
+          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
+            echo "AndroidManifest.xml tidak ditemukan"
+            exit 1
+          fi
+
+          if [ ! -f android/gradlew ] || [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            rm -rf android
+            flutter create \
+              --platforms=android \
+              --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
+              .
+          fi
 
           chmod +x android/gradlew
 
@@ -163,13 +182,12 @@ jobs:
           flutter pub get
 
           if grep -q "flutter_launcher_icons:" pubspec.yaml; then
-            echo "Generating launcher icons..."
             dart run flutter_launcher_icons
           fi
 
           test -f pubspec.lock
 
-      - name: Fix Dart 3.13 Compatibility
+      - name: Fix Dart Compatibility
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
@@ -210,8 +228,6 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          mkdir -p android
-
           touch android/gradle.properties
 
           if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
@@ -226,7 +242,7 @@ jobs:
             echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
           fi
 
-      - name: Verify App Configuration
+      - name: Verify Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
         run: |
@@ -234,29 +250,26 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          echo "=== PUBSPEC ==="
-          grep -E '^(name|version):' pubspec.yaml || true
+          test -d android
+          test -f android/app/src/main/AndroidManifest.xml
+          test -f android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.properties
 
-          echo "=== ICON CONFIG ==="
-          grep -A5 -B2 'flutter_launcher_icons:' pubspec.yaml || true
-
-          echo "=== ANDROID MANIFEST ==="
-          grep -E 'android:label|android:icon|usesCleartextTraffic' \
-            android/app/src/main/AndroidManifest.xml || true
-
-          echo "=== ICON FILE ==="
-
-          if [ -f "assest/icon/icon.png" ]; then
-            echo "assest/icon/icon.png ditemukan"
+          if [ -f android/settings.gradle.kts ]; then
+            test -f android/settings.gradle.kts
           else
-            echo "WARNING: assest/icon/icon.png tidak ditemukan"
+            test -f android/settings.gradle
           fi
 
-          echo "=== GENERATED ICONS ==="
-          find android/app/src/main/res \
-            -type f \
-            \( -name "ic_launcher*" -o -name "*launcher*" \) \
-            -print 2>/dev/null || true
+          if [ -f android/app/build.gradle.kts ]; then
+            test -f android/app/build.gradle.kts
+          else
+            test -f android/app/build.gradle
+          fi
+
+          if [ -f "assest/icon/icon.png" ]; then
+            echo "Icon ditemukan"
+          fi
 
       - name: Build APK
         env:
@@ -298,18 +311,11 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "APK tidak ditemukan"
-
-            find "$PROJECT_DIR/build" \
-              -type f \
-              -print \
-              2>/dev/null || true
-
+            find "$PROJECT_DIR/build" -type f -print 2>/dev/null || true
             exit 1
           fi
 
-          echo "APK ditemukan:"
-          echo "$APK"
-
+          echo "APK: $APK"
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK Artifact
