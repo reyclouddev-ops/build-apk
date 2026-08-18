@@ -119,7 +119,6 @@ jobs:
 
           if [ -z "$SELECTED" ]; then
             echo "Tidak dapat menentukan Flutter project"
-            printf '%s\n' "${PUBSPECS[@]}"
             exit 1
           fi
 
@@ -128,20 +127,11 @@ jobs:
           echo "Selected project:"
           echo "$SELECTED"
 
-          echo "Selected pubspec:"
-          echo "$PUBSPEC"
-
           echo "Project name:"
           grep -E '^name:' "$PUBSPEC" || true
 
           echo "Project version:"
           grep -E '^version:' "$PUBSPEC" || true
-
-          echo "Flutter environment:"
-          grep -A2 '^environment:' "$PUBSPEC" || true
-
-          echo "Dependencies:"
-          sed -n '/^dependencies:/,/^dev_dependencies:/p' "$PUBSPEC" || true
 
           echo "dir=$SELECTED" >> "$GITHUB_OUTPUT"
           echo "pubspec=$PUBSPEC" >> "$GITHUB_OUTPUT"
@@ -159,10 +149,7 @@ jobs:
           echo "Working directory:"
           pwd
 
-          echo "Flutter:"
           flutter --version
-
-          echo "Dart:"
           dart --version
 
           ANDROID_VALID=true
@@ -181,11 +168,15 @@ jobs:
             ANDROID_VALID=false
           fi
 
-          if [ ! -f android/gradle.properties ]; then
+          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
             ANDROID_VALID=false
           fi
 
-          if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
+          if [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+            ANDROID_VALID=false
+          fi
+
+          if [ ! -f android/gradlew ]; then
             ANDROID_VALID=false
           fi
 
@@ -199,8 +190,8 @@ jobs:
               --platforms=android \
               .
           else
-            echo "Android project lengkap ditemukan."
-            echo "Skip flutter create."
+            echo "Android project lengkap."
+            echo "Konfigurasi Android user dipertahankan."
           fi
 
           flutter clean
@@ -253,9 +244,8 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          mkdir -p android
-
-          touch android/gradle.properties
+          test -d android
+          test -f android/gradle.properties
 
           if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
             echo 'android.useAndroidX=true' >> android/gradle.properties
