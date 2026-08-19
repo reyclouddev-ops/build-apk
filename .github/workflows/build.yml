@@ -7,10 +7,12 @@ on:
         description: Flutter project ZIP URL
         required: true
         type: string
+
       tag:
         description: Build tag
         required: true
         type: string
+
       build_type:
         description: Build type
         required: false
@@ -26,9 +28,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # ============================================================
+      # SETUP FLUTTER
+      # ============================================================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -36,15 +46,26 @@ jobs:
           flutter-version: "3.47.0"
           cache: true
 
+
+      # ============================================================
+      # DOWNLOAD PROJECT
+      # ============================================================
       - name: Download Project
         env:
           ZIP_URL: ${{ inputs.zip_url }}
           GH_TOKEN: ${{ secrets.GH_PAT }}
+
         run: |
           set -e
 
+          echo "=========================================="
+          echo "DOWNLOAD FLUTTER PROJECT"
+          echo "=========================================="
+
           rm -rf project
           mkdir -p project
+
+          echo "Downloading project ZIP..."
 
           curl -L \
             --fail-with-body \
@@ -59,17 +80,62 @@ jobs:
             "$ZIP_URL" \
             -o project/project.zip
 
+          echo ""
+          echo "Checking downloaded file..."
+
           test -s project/project.zip
+
+          echo "File information:"
+          file project/project.zip
+
+          echo ""
+          echo "Checking ZIP integrity..."
+
+          if ! unzip -tq project/project.zip; then
+            echo ""
+            echo "=========================================="
+            echo "ERROR: ZIP PROJECT TIDAK VALID"
+            echo "=========================================="
+            echo ""
+            echo "ZIP yang diberikan rusak atau tidak kompatibel."
+            echo "Silakan buat ulang ZIP project Flutter."
+            echo ""
+            exit 1
+          fi
+
+          echo ""
+          echo "ZIP validation OK."
+          echo ""
+
+          echo "Extracting project..."
+
           unzip -oq project/project.zip -d project
+
           rm -f project/project.zip
 
+          echo ""
+          echo "Project berhasil diekstrak."
+
+          echo ""
+          echo "Isi project:"
+          find project -maxdepth 2 -type f | head -100
+
+
+      # ============================================================
+      # FIND FLUTTER PROJECT
+      # ============================================================
       - name: Find Flutter Project
         id: project
+
         run: |
           set -e
 
           ROOT="$GITHUB_WORKSPACE/project"
           SELECTED=""
+
+          echo "=========================================="
+          echo "MENCARI FLUTTER PROJECT"
+          echo "=========================================="
 
           mapfile -t PUBSPECS < <(
             find "$ROOT" \
@@ -81,9 +147,18 @@ jobs:
           )
 
           if [ "${#PUBSPECS[@]}" -eq 0 ]; then
-            echo "Flutter project tidak ditemukan"
+            echo "Flutter project tidak ditemukan."
             exit 1
           fi
+
+          echo ""
+          echo "pubspec.yaml ditemukan:"
+
+          for PUBSPEC in "${PUBSPECS[@]}"; do
+            echo " - $PUBSPEC"
+          done
+
+          echo ""
 
           for PUBSPEC in "${PUBSPECS[@]}"; do
             DIR="$(dirname "$PUBSPEC")"
@@ -113,225 +188,469 @@ jobs:
           fi
 
           if [ -z "$SELECTED" ]; then
-            echo "Tidak dapat menentukan Flutter project"
+            echo "Tidak dapat menentukan Flutter project."
             exit 1
           fi
 
-          echo "Project: $SELECTED"
+          echo "Project terpilih:"
+          echo "$SELECTED"
+
           echo "dir=$SELECTED" >> "$GITHUB_OUTPUT"
 
+
+      # ============================================================
+      # PREPARE PROJECT
+      # ============================================================
       - name: Prepare Project
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          echo "=========================================="
+          echo "PREPARE FLUTTER PROJECT"
+          echo "=========================================="
+
           test -f pubspec.yaml
           test -d lib
 
+          echo ""
+          echo "Flutter:"
           flutter --version
+
+          echo ""
+          echo "Dart:"
           dart --version
 
+
+          # --------------------------------------------------------
+          # CREATE ANDROID PROJECT JIKA BELUM ADA
+          # --------------------------------------------------------
+
           if [ ! -d android ]; then
+
+            echo ""
+            echo "Android folder tidak ditemukan."
+            echo "Membuat Android project..."
+
+            PROJECT_NAME="$(
+              grep -E '^name:' pubspec.yaml \
+              | head -n1 \
+              | sed 's/^name:[[:space:]]*//' \
+              | tr '-' '_' \
+              | tr -cd 'a-zA-Z0-9_'
+            )"
+
+            if [ -z "$PROJECT_NAME" ]; then
+              PROJECT_NAME="flutter_app"
+            fi
+
             flutter create \
               --platforms=android \
-              --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
+              --project-name="$PROJECT_NAME" \
               .
+
           fi
+
+
+          # --------------------------------------------------------
+          # VERIFY ANDROID
+          # --------------------------------------------------------
 
           if [ -f android/settings.gradle.kts ]; then
             echo "settings.gradle.kts OK"
+
           elif [ -f android/settings.gradle ]; then
             echo "settings.gradle OK"
+
           else
-            echo "Android settings tidak ditemukan"
+            echo "Android settings tidak ditemukan."
             exit 1
           fi
+
 
           if [ -f android/app/build.gradle.kts ]; then
             echo "build.gradle.kts OK"
+
           elif [ -f android/app/build.gradle ]; then
             echo "build.gradle OK"
+
           else
-            echo "Android build.gradle tidak ditemukan"
+            echo "Android build.gradle tidak ditemukan."
             exit 1
           fi
+
 
           if [ ! -f android/app/src/main/AndroidManifest.xml ]; then
-            echo "AndroidManifest.xml tidak ditemukan"
+            echo "AndroidManifest.xml tidak ditemukan."
             exit 1
           fi
 
-          if [ ! -f android/gradlew ] || [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+
+          # --------------------------------------------------------
+          # RECREATE ANDROID JIKA GRADLE WRAPPER RUSAK/HILANG
+          # --------------------------------------------------------
+
+          if [ ! -f android/gradlew ] || \
+             [ ! -f android/gradle/wrapper/gradle-wrapper.properties ]; then
+
+            echo ""
+            echo "Gradle wrapper tidak lengkap."
+            echo "Membuat ulang Android project..."
+
             rm -rf android
+
+            PROJECT_NAME="$(
+              grep -E '^name:' pubspec.yaml \
+              | head -n1 \
+              | sed 's/^name:[[:space:]]*//' \
+              | tr '-' '_' \
+              | tr -cd 'a-zA-Z0-9_'
+            )"
+
+            if [ -z "$PROJECT_NAME" ]; then
+              PROJECT_NAME="flutter_app"
+            fi
+
             flutter create \
               --platforms=android \
-              --project-name="$(grep -E '^name:' pubspec.yaml | head -n1 | sed 's/^name:[[:space:]]*//' | tr '-' '_' | tr -cd 'a-zA-Z0-9_')" \
+              --project-name="$PROJECT_NAME" \
               .
+
           fi
 
+
           chmod +x android/gradlew
+
+
+          # --------------------------------------------------------
+          # CLEAN PROJECT
+          # --------------------------------------------------------
+
+          echo ""
+          echo "Cleaning project..."
 
           flutter clean
 
           rm -rf .dart_tool
           rm -rf build
 
+
+          # --------------------------------------------------------
+          # GET DEPENDENCIES
+          # --------------------------------------------------------
+
+          echo ""
+          echo "Running flutter pub get..."
+
           flutter pub get
 
+
+          # --------------------------------------------------------
+          # FLUTTER LAUNCHER ICONS
+          # --------------------------------------------------------
+
           if grep -q "flutter_launcher_icons:" pubspec.yaml; then
+
+            echo ""
+            echo "Generating launcher icons..."
+
             dart run flutter_launcher_icons
+
           fi
+
 
           test -f pubspec.lock
 
+          echo ""
+          echo "Prepare project selesai."
+
+
+      # ============================================================
+      # FIX DART COMPATIBILITY
+      # ============================================================
       - name: Fix Dart Compatibility
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          echo "=========================================="
+          echo "CHECK DART COMPATIBILITY"
+          echo "=========================================="
+
           if grep -qE '^[[:space:]]*dartssh2:' pubspec.yaml; then
-            LOCK_VERSION=$(awk '
-              /^  dartssh2:/ {
-                found=1
-                next
-              }
-              found && /^[[:space:]]+version:/ {
-                gsub(/"/, "", $2)
-                print $2
-                exit
-              }
-              found && /^  [a-zA-Z0-9_]+:/ {
-                exit
-              }
-            ' pubspec.lock)
+
+            LOCK_VERSION="$(
+              awk '
+                /^  dartssh2:/ {
+                  found=1
+                  next
+                }
+
+                found && /^[[:space:]]+version:/ {
+                  gsub(/"/, "", $2)
+                  print $2
+                  exit
+                }
+
+                found && /^  [a-zA-Z0-9_]+:/ {
+                  exit
+                }
+              ' pubspec.lock
+            )"
+
+            echo "dartssh2 version: $LOCK_VERSION"
 
             if [ "$LOCK_VERSION" = "2.14.0" ]; then
+
               TARGET="$HOME/.pub-cache/hosted/pub.dev/dartssh2-$LOCK_VERSION/lib/src/sftp/sftp_client.dart"
 
               if [ -f "$TARGET" ]; then
-                python3 -c 'import sys; p=sys.argv[1]; d=open(p,encoding="utf-8").read(); d=d.replace("if (bytessRecieved >= length) {","if (length != null && bytessRecieved >= length) {",1); open(p,"w",encoding="utf-8").write(d)' "$TARGET"
+
+                echo "Applying dartssh2 compatibility patch..."
+
+                python3 -c '
+                import sys
+
+                p = sys.argv[1]
+
+                with open(p, encoding="utf-8") as f:
+                    d = f.read()
+
+                d = d.replace(
+                    "if (bytessRecieved >= length) {",
+                    "if (length != null && bytessRecieved >= length) {",
+                    1
+                )
+
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(d)
+                ' "$TARGET"
+
+                echo "Patch selesai."
+
               fi
+
             fi
+
           fi
 
+
+      # ============================================================
+      # CONFIGURE ANDROID
+      # ============================================================
       - name: Configure Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          echo "=========================================="
+          echo "CONFIGURE ANDROID"
+          echo "=========================================="
+
           touch android/gradle.properties
+
 
           if ! grep -q '^android.useAndroidX=' android/gradle.properties; then
             echo 'android.useAndroidX=true' >> android/gradle.properties
           fi
 
+
           if ! grep -q '^android.enableJetifier=' android/gradle.properties; then
             echo 'android.enableJetifier=true' >> android/gradle.properties
           fi
+
 
           if ! grep -q '^org.gradle.jvmargs=' android/gradle.properties; then
             echo 'org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G -Dfile.encoding=UTF-8' >> android/gradle.properties
           fi
 
+          echo ""
+          echo "Android configuration selesai."
+
+
+      # ============================================================
+      # VERIFY ANDROID
+      # ============================================================
       - name: Verify Android
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          echo "=========================================="
+          echo "VERIFY ANDROID PROJECT"
+          echo "=========================================="
+
+
           test -d android
+
           test -f android/app/src/main/AndroidManifest.xml
+
           test -f android/gradlew
+
           test -f android/gradle/wrapper/gradle-wrapper.properties
 
+
           if [ -f android/settings.gradle.kts ]; then
-            test -f android/settings.gradle.kts
+            echo "settings.gradle.kts OK"
           else
             test -f android/settings.gradle
+            echo "settings.gradle OK"
           fi
+
 
           if [ -f android/app/build.gradle.kts ]; then
-            test -f android/app/build.gradle.kts
+            echo "build.gradle.kts OK"
           else
             test -f android/app/build.gradle
+            echo "build.gradle OK"
           fi
 
-          if [ -f "assest/icon/icon.png" ]; then
-            echo "Icon ditemukan"
+
+          # FIX TYPO ASSET
+          if [ -f "assets/icon/icon.png" ]; then
+            echo "Icon ditemukan di assets/icon/icon.png"
+          elif [ -f "assest/icon/icon.png" ]; then
+            echo "Icon ditemukan di assest/icon/icon.png"
           fi
 
+
+          echo ""
+          echo "Android project valid."
+
+
+      # ============================================================
+      # BUILD APK
+      # ============================================================
       - name: Build APK
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
           BUILD_TYPE: ${{ inputs.build_type }}
+
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
+          echo "=========================================="
+          echo "BUILD FLUTTER APK"
+          echo "=========================================="
+
+          echo "Build type: $BUILD_TYPE"
+
           case "$BUILD_TYPE" in
+
             debug)
               flutter build apk --debug
               ;;
+
             profile)
               flutter build apk --profile
               ;;
+
             release)
               flutter build apk --release
               ;;
+
             *)
               echo "Build type tidak valid: $BUILD_TYPE"
+              echo "Gunakan: debug, profile, atau release"
               exit 1
               ;;
+
           esac
 
+          echo ""
+          echo "BUILD APK BERHASIL."
+
+
+      # ============================================================
+      # FIND APK
+      # ============================================================
       - name: Find APK
         id: apk
+
         env:
           PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
         run: |
           set -e
 
-          APK="$(find "$PROJECT_DIR/build/app/outputs" \
-            -type f \
-            -name "*.apk" \
-            -print \
-            | head -n 1)"
+          echo "=========================================="
+          echo "MENCARI APK"
+          echo "=========================================="
+
+          APK="$(
+            find "$PROJECT_DIR/build/app/outputs" \
+              -type f \
+              -name "*.apk" \
+              -print \
+              | head -n 1
+          )"
+
 
           if [ -z "$APK" ]; then
-            echo "APK tidak ditemukan"
-            find "$PROJECT_DIR/build" -type f -print 2>/dev/null || true
+
+            echo "APK tidak ditemukan."
+
+            find "$PROJECT_DIR/build" \
+              -type f \
+              -print \
+              2>/dev/null || true
+
             exit 1
+
           fi
 
-          echo "APK: $APK"
+
+          echo "APK ditemukan:"
+          echo "$APK"
+
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
+
+      # ============================================================
+      # UPLOAD APK ARTIFACT
+      # ============================================================
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
+
         with:
           name: flutter-apk-${{ inputs.tag }}
           path: ${{ steps.apk.outputs.path }}
           if-no-files-found: error
           retention-days: 7
 
+
+      # ============================================================
+      # CREATE RELEASE
+      # ============================================================
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ inputs.tag }}
+
         run: |
           set -e
+
+          echo "=========================================="
+          echo "CREATE GITHUB RELEASE"
+          echo "=========================================="
 
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
@@ -340,26 +659,49 @@ jobs:
             --draft \
             --generate-notes=false
 
+
+      # ============================================================
+      # UPLOAD APK RELEASE
+      # ============================================================
       - name: Upload APK Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ inputs.tag }}
           APK: ${{ steps.apk.outputs.path }}
+
         run: |
           set -e
+
+          echo "Uploading APK to release..."
 
           gh release upload "$TAG" \
             "$APK" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
+
+      # ============================================================
+      # PUBLISH RELEASE
+      # ============================================================
       - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           TAG: ${{ inputs.tag }}
+
         run: |
           set -e
+
+          echo "=========================================="
+          echo "PUBLISH RELEASE"
+          echo "=========================================="
 
           gh release edit "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft=false
+
+          echo ""
+          echo "=========================================="
+          echo "BUILD SELESAI"
+          echo "=========================================="
+          echo "Tag: $TAG"
+          echo "APK berhasil dibuat dan dipublish."
